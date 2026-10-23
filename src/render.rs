@@ -175,6 +175,43 @@ struct Vertex {
     color: [f32; 4],
 }
 
+fn shape_buffer(
+    font_system: &mut FontSystem,
+    text: &str,
+    attrs: Attrs<'_>,
+    metrics: Metrics,
+    width: Option<f32>,
+) -> Buffer {
+    let mut buffer = Buffer::new(font_system, metrics);
+    buffer.set_size(font_system, width, Some(metrics.line_height));
+    buffer.set_wrap(font_system, Wrap::None);
+    buffer.set_text(font_system, text, &attrs, Shaping::Advanced);
+    buffer.shape_until_scroll(font_system, false);
+    buffer
+}
+
+fn status_buffer(
+    font_system: &mut FontSystem,
+    text: &str,
+    config: &Config,
+    scale: f32,
+    width: f32,
+) -> Buffer {
+    let family = if config.font_family == "monospace" {
+        Family::Monospace
+    } else {
+        Family::Name(&config.font_family)
+    };
+    // UI text follows display scaling, independently of terminal zoom and line spacing.
+    shape_buffer(
+        font_system,
+        text,
+        Attrs::new().family(family),
+        Metrics::new(11.0 * scale, (16.0 * scale).ceil()),
+        Some(width.max(0.0)),
+    )
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -354,28 +391,21 @@ impl Renderer {
         italic: bool,
         width: Option<f32>,
     ) -> Buffer {
-        let mut buffer = Buffer::new(
-            &mut self.font_system,
-            Metrics::new(config.font_size * self.scale, self.cell_height),
-        );
-        buffer.set_size(&mut self.font_system, width, Some(self.cell_height));
-        buffer.set_wrap(&mut self.font_system, Wrap::None);
         let family = if config.font_family == "monospace" {
             Family::Monospace
         } else {
             Family::Name(&config.font_family)
         };
-        buffer.set_text(
+        shape_buffer(
             &mut self.font_system,
             text,
-            &Attrs::new()
+            Attrs::new()
                 .family(family)
                 .weight(if bold { Weight::BOLD } else { Weight::NORMAL })
                 .style(if italic { Style::Italic } else { Style::Normal }),
-            Shaping::Advanced,
-        );
-        buffer.shape_until_scroll(&mut self.font_system, false);
-        buffer
+            Metrics::new(config.font_size * self.scale, self.cell_height),
+            width,
+        )
     }
 
     fn rectangle(&self, vertices: &mut Vec<Vertex>, x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3]) {
@@ -434,6 +464,7 @@ impl Renderer {
                 height: size.height,
             },
         );
+        let footer_y = (size.height as f32 - self.footer_height).max(0.0);
         let mut vertices = Vec::new();
         let mut glyphs = Vec::new();
         for cell in &snapshot.cells {
@@ -536,7 +567,6 @@ impl Renderer {
                 ));
             }
         }
-        let footer_y = size.height as f32 - self.footer_height;
         self.rectangle(
             &mut vertices,
             0.0,
@@ -553,22 +583,15 @@ impl Renderer {
             self.scale,
             [44, 51, 64],
         );
-        let mut footer_config = config.clone();
-        footer_config.font_size = 11.0;
-        let footer = Arc::new(self.buffer(
+        let footer_width = (size.width as f32 - 2.0 * self.padding).max(0.0);
+        let footer = status_buffer(
+            &mut self.font_system,
             status,
-            &footer_config,
-            false,
-            false,
-            Some(size.width as f32 - 2.0 * self.padding),
-        ));
-        glyphs.push((
-            footer,
-            self.padding,
-            footer_y + 3.0 * self.scale,
-            size.width as f32 - self.padding,
-            [151, 166, 185],
-        ));
+            config,
+            self.scale,
+            footer_width,
+        );
+        let footer_top = footer_y + (self.footer_height - footer.metrics().line_height) / 2.0;
         self.text
             .prepare(
                 &self.device,
@@ -576,20 +599,36 @@ impl Renderer {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                glyphs.iter().map(|(buffer, x, y, width, rgb)| TextArea {
-                    buffer,
-                    left: *x,
-                    top: *y,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: *x as i32,
-                        top: *y as i32,
-                        right: (*x + width).ceil() as i32,
-                        bottom: (*y + self.cell_height).ceil() as i32,
-                    },
-                    default_color: Color::rgb(rgb[0], rgb[1], rgb[2]),
-                    custom_glyphs: &[],
-                }),
+                glyphs
+                    .iter()
+                    .map(|(buffer, x, y, width, rgb)| TextArea {
+                        buffer,
+                        left: *x,
+                        top: *y,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: *x as i32,
+                            top: *y as i32,
+                            right: (*x + width).ceil() as i32,
+                            bottom: ((*y + self.cell_height).ceil() as i32).min(footer_y as i32),
+                        },
+                        default_color: Color::rgb(rgb[0], rgb[1], rgb[2]),
+                        custom_glyphs: &[],
+                    })
+                    .chain(std::iter::once(TextArea {
+                        buffer: &footer,
+                        left: self.padding,
+                        top: footer_top,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: self.padding as i32,
+                            top: footer_y.ceil() as i32,
+                            right: (self.padding + footer_width).floor() as i32,
+                            bottom: size.height as i32,
+                        },
+                        default_color: Color::rgb(151, 166, 185),
+                        custom_glyphs: &[],
+                    })),
                 &mut self.swash,
             )
             .context("Prepare glyph atlas")?;
@@ -650,6 +689,41 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn status_text_stays_inside_bar_at_extreme_terminal_zoom() {
+        let mut fonts = FontSystem::new();
+        for scale in [1.0_f32, 1.25, 2.0] {
+            let bar_height = (28.0 * scale).round();
+            for font_size in [6.0, 15.0, 72.0] {
+                for line_spacing in [1.0, 1.3, 3.0] {
+                    let config = Config {
+                        font_size,
+                        line_spacing,
+                        ..Config::default()
+                    };
+                    let buffer = status_buffer(
+                        &mut fonts,
+                        "vibeterm / Ctrl Shift C copy",
+                        &config,
+                        scale,
+                        800.0 * scale,
+                    );
+                    let offset = (bar_height - buffer.metrics().line_height) / 2.0;
+                    assert!(offset >= 0.0);
+                    assert!(offset + buffer.metrics().line_height <= bar_height);
+                    let runs: Vec<_> = buffer.layout_runs().collect();
+                    assert_eq!(runs.len(), 1);
+                    assert!(!runs[0].glyphs.is_empty());
+                    let baseline = offset + runs[0].line_y;
+                    assert!(
+                        baseline > 0.0 && baseline < bar_height,
+                        "font={font_size}, spacing={line_spacing}, scale={scale}: baseline {baseline} outside {bar_height}px bar"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn xterm_cube_and_grayscale() {
         let config = Config::default();

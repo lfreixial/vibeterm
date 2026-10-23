@@ -16,9 +16,11 @@ Rust 1.90.0. Engine tests, real PTYs, and desktop interaction are distinguished 
 | PTY input/output/resize/reap | Tested | Real subprocess suite |
 | Split UTF-8 / combining / wide cells | Tested | Replay assertions, visible fixture |
 | Basic emoji / fallback / bold / italic | Visually tested | Complex clusters need more coverage |
+| Status bar at maximum font/spacing | Tested | Independent UI metrics; [72 px / 3× spacing capture](footer-maximum-zoom.png), plus layout checks at 1×/1.25×/2× scales |
 | Truecolor / 256 colors / inverse / underline | Tested | Fixture and engine assertions |
 | Wrapped/wide selection text | Engine-tested | Exact string assertion |
-| Physical selection / copy / primary / paste | Not verified | KWin prevented synthetic pointer targeting |
+| Physical selection / copy / middle-click primary paste | User-verified | Owner reports these work (2026-10-23); display backend not specified |
+| Clipboard paste shortcut / cross-backend mouse coverage | Not fully verified | KWin prevented synthetic pointer targeting; broader manual coverage pending |
 | Legacy / SGR mouse | Encoding-tested | Real TUI mouse interaction pending |
 | Application cursor keys | Encoding-tested | Desktop TUI keys also work |
 | Application keypad / Kitty keyboard | Not implemented | Kitty mode disabled |
@@ -51,3 +53,9 @@ Rust 1.90.0. Engine tests, real PTYs, and desktop interaction are distinguished 
 8. Repeat relevant checks separately on native Wayland and X11.
 
 Compilation alone is never a passed visual, clipboard, input, or hardware test.
+
+Status-bar regression verification (2026-10-23): library tests (5), clippy, and the
+release build passed. An isolated X11 window at 72 px font / 3× line spacing was
+captured and visually inspected; the status text stays inside its bar. The broader
+X11 script did not complete in this desktop session (resize-step timeout), so this
+follow-up is a focused rendering check, not a fresh pass of the full desktop suite.

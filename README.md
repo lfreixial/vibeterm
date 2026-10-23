@@ -5,8 +5,9 @@ Graphite surfaces, readable text, a quiet teal accent, and no continuous idle an
 
 **Early single-pane release, not yet a daily driver.** M0 and the M1 implementation
 are present. Real Bash input, resize, Unicode/color rendering, and `less` were tested
-on the desktop. Physical mouse/clipboard, IME, and mixed-monitor scaling still need
-manual acceptance. Tabs, splits, search, and a command palette are the next milestone.
+on the desktop. The owner has confirmed selection/copy and middle-click paste work.
+Broader clipboard/backend coverage, IME, and mixed-monitor scaling still need manual
+acceptance. Tabs, splits, search, and a command palette are the next milestone.
 
 ![Actual release build rendering the ANSI/Unicode fixture](docs/screenshot.png)
 

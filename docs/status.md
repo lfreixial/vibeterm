@@ -21,7 +21,10 @@ typing/resize and `less` paging/search/exit pass on X11; GPU text was visually i
 Invalid config reload was visually verified to retain the live shell; valid reload
 then succeeded. The final release smoke script exits cleanly.
 
-**Acceptance still required:** physical mouse selection/copy/paste on both backends,
+Owner feedback (2026-10-23) confirms selection/copy and middle-click paste work;
+the display backend was not specified.
+
+**Acceptance still required:** remaining clipboard and mouse coverage on both backends,
 Wayland keyboard/TUI interaction, real IME composition, mixed-monitor scaling,
 application keypad support, and a fuller terminal capability audit. KWin blocked the
 test driver's pointer targeting, so those interactions were not marked passed.

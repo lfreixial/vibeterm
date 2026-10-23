@@ -1,6 +1,9 @@
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -17,6 +20,7 @@ pub struct Config {
     pub background: String,
     pub accent: String,
     pub shell: Option<String>,
+    pub keybindings: std::collections::BTreeMap<crate::actions::Action, String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -43,23 +47,29 @@ impl Default for Config {
             background: "#171b24".into(),
             accent: "#80cbc4".into(),
             shell: None,
+            keybindings: Default::default(),
         }
     }
 }
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        let source = match std::fs::read_to_string(path) {
-            Ok(source) => source,
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::default());
             }
             Err(error) => return Err(error).context("Cannot read configuration"),
         };
+        let mut source = String::new();
+        file.take(65537)
+            .read_to_string(&mut source)
+            .context("Cannot read configuration")?;
         Self::parse(&source).with_context(|| format!("Invalid configuration: {}", path.display()))
     }
 
     pub fn parse(source: &str) -> Result<Self> {
+        anyhow::ensure!(source.len() <= 65536, "Configuration exceeds 64 KiB");
         let config: Self = toml::from_str(source)?;
         if !(6.0..=72.0).contains(&config.font_size)
             || !(1.0..=3.0).contains(&config.line_spacing)
@@ -74,6 +84,7 @@ impl Config {
         for color in [&config.foreground, &config.background, &config.accent] {
             parse_color(color)?;
         }
+        crate::actions::validate(&config.keybindings)?;
         Ok(config)
     }
 }

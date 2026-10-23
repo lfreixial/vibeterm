@@ -71,3 +71,32 @@ output, GPU wakeups, scrolling/resizing distributions, multi-monitor scaling,
 minimized long-duration CPU, memory over repeated create/close cycles and all cache
 limits, and comparable Kitty/Ghostty/Alacritty runs. Set regression budgets only
 after representative repeated measurements on a stable build/environment.
+
+## Workspace release follow-up — 2026-10-23
+
+The M2 workspace build passes 23 tests, fmt, clippy and release compilation.
+The release X11 script with `--workspace` passes all keyboard/TUI/workspace checks,
+including real clipboard retrieval of a selected search match. Optional pointer
+checks remain separate. All six spawned workspace test shells were reaped.
+
+Native Wayland, same machine, blink disabled:
+
+| Measurement | Observation | Scope |
+| --- | --- | --- |
+| Idle CPU | 0.000% of one core | Four-second `/proc` sample; timer-resolution limit still applies |
+| Idle RSS | 86,784 KiB (~84.8 MiB) | Main process, nearly empty history |
+| Idle frames | 3 | Seven-second fixture, including startup/output |
+| Warm first frame | 74.49, 81.26, 76.87 ms | First submission, not shell readiness |
+| Million-line fixture | 0.810 s | Whole process wall time including startup/exit |
+| Output frame work | p50 0.831 ms / p95 0.964 ms | 150 frames; CPU + acquisition + submission |
+
+The idle window was 1060×700 at scale 1. The compositor placed the subsequent
+warm-start/output windows at 1590×1050, scale 1.5, grid 110×32. These are not
+identical conditions to the previous baseline and do not establish a speedup.
+Opening at scale 1.5 also does not replace mixed-monitor interaction testing.
+
+The release X11 workspace scenario presented 1,043 frames, p50 5.869 ms / p95
+6.069 ms including acquisition/submission. This still exceeds a 240 Hz interval
+and does not demonstrate 240 Hz interaction. Raw data is in
+[workspace-release-check.txt](workspace-release-check.txt).
+Multi-pane sustained-load and physical input-latency measurements remain pending.

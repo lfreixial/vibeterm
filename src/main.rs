@@ -31,6 +31,11 @@ pub struct Args {
 fn run() -> Result<()> {
     let mut args = Args::parse();
     let path = args.config.clone().unwrap_or_else(config::path);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()?.join(path)
+    };
     let config = Config::load(&path)?;
     if args.check_config {
         println!("Configuration valid: {}", path.display());

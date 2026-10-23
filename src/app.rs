@@ -8,6 +8,7 @@ use alacritty_terminal::{
 use anyhow::{Context, Result};
 use arboard::{Clipboard, GetExtLinux, LinuxClipboardKind, SetExtLinux};
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     sync::{
         Arc,
@@ -17,10 +18,14 @@ use std::{
     time::{Duration, Instant},
 };
 use vibeterm::{
+    actions::{self, ACTIONS, Action},
     config::Config,
     input,
-    render::{Renderer, Snapshot},
-    session::{Session, engine_config},
+    render::{Overlay, PaneFrame, Renderer, Snapshot, TabLabel},
+    search::{self, SearchWorker},
+    session::Session,
+    watch::ConfigWatcher,
+    workspace::{Axis, MAX_PANES, MAX_TABS, PaneId, Rect, Workspace},
 };
 use winit::{
     application::ApplicationHandler,
@@ -32,14 +37,22 @@ use winit::{
 };
 
 enum Event {
-    Wake,
-    Paste(std::result::Result<String, String>),
+    Wake(PaneId),
+    Spawned {
+        id: PaneId,
+        origin: PaneId,
+        axis: Option<Axis>,
+        size: vibeterm::session::Size,
+        result: std::result::Result<Session, String>,
+    },
+    Paste(PaneId, std::result::Result<String, String>),
     Notice(String),
     Config(std::result::Result<Config, String>),
+    Search(search::Response),
 }
 enum ClipboardCommand {
     Copy(String, bool),
-    Paste(bool),
+    Paste(PaneId, bool),
 }
 
 fn clipboard_worker(proxy: EventLoopProxy<Event>) -> SyncSender<ClipboardCommand> {
@@ -69,7 +82,7 @@ fn clipboard_worker(proxy: EventLoopProxy<Event>) -> SyncSender<ClipboardCommand
                         let _ = proxy.send_event(Event::Notice(format!("Copy failed: {error}")));
                     }
                 }
-                ClipboardCommand::Paste(primary) => {
+                ClipboardCommand::Paste(id, primary) => {
                     let kind = if primary {
                         LinuxClipboardKind::Primary
                     } else {
@@ -80,7 +93,7 @@ fn clipboard_worker(proxy: EventLoopProxy<Event>) -> SyncSender<ClipboardCommand
                         .clipboard(kind)
                         .text()
                         .map_err(|e| format!("Paste failed: {e}"));
-                    let _ = proxy.send_event(Event::Paste(result));
+                    let _ = proxy.send_event(Event::Paste(id, result));
                 }
             }
         }
@@ -88,9 +101,31 @@ fn clipboard_worker(proxy: EventLoopProxy<Event>) -> SyncSender<ClipboardCommand
     tx
 }
 
+struct SearchUi {
+    query: String,
+    status: String,
+    token: u64,
+    matched: Option<search::Match>,
+}
+
+struct Pane {
+    session: Session,
+    size: vibeterm::session::Size,
+}
+
 struct State {
     renderer: Renderer,
-    session: Session,
+    panes: BTreeMap<PaneId, Pane>,
+    workspace: Workspace,
+    next_id: PaneId,
+    spawning: bool,
+    proxy: EventLoopProxy<Event>,
+    directory: PathBuf,
+    config_path: PathBuf,
+    palette: Option<(String, usize)>,
+    search: Option<SearchUi>,
+    search_worker: SearchWorker,
+    _watcher: Option<ConfigWatcher>,
     clipboard: SyncSender<ClipboardCommand>,
     modifiers: ModifiersState,
     mouse: PhysicalPosition<f64>,
@@ -111,6 +146,22 @@ struct State {
     ime_position: Option<(usize, usize)>,
 }
 impl State {
+    fn session(&self) -> &Session {
+        &self.panes[&self.workspace.active()].session
+    }
+    fn placements(&self) -> Vec<(PaneId, Rect)> {
+        self.workspace.placements(
+            self.renderer.content_rect(self.workspace.tabs.len()),
+            6.0 * self.renderer.scale,
+        )
+    }
+    fn active_rect(&self) -> Rect {
+        self.placements()
+            .into_iter()
+            .find(|(id, _)| *id == self.workspace.active())
+            .map(|(_, r)| r)
+            .unwrap_or_default()
+    }
     fn redraw(&self) {
         if !self.occluded {
             self.renderer.window.request_redraw();
@@ -124,11 +175,11 @@ impl State {
         if bytes.is_empty() {
             return;
         }
-        if let Err(error) = self.session.input(bytes) {
+        if let Err(error) = self.session().input(bytes) {
             self.notice(error.to_string());
             return;
         }
-        let mut term = self.session.terminal.lock();
+        let mut term = self.session().terminal.lock();
         term.scroll_display(Scroll::Bottom);
         term.selection = None;
         drop(term);
@@ -137,18 +188,19 @@ impl State {
         self.redraw();
     }
     fn report(&mut self, bytes: Vec<u8>) {
-        if let Err(error) = self.session.input(bytes) {
+        if let Err(error) = self.session().input(bytes) {
             self.notice(error.to_string());
         }
     }
     fn mode(&self) -> TermMode {
-        *self.session.terminal.lock().mode()
+        *self.session().terminal.lock().mode()
     }
     fn cell(&self) -> (usize, usize) {
-        let term = self.session.terminal.lock();
-        let col = ((self.mouse.x as f32 - self.renderer.padding).max(0.0)
+        let term = self.session().terminal.lock();
+        let rect = self.active_rect();
+        let col = ((self.mouse.x as f32 - rect.x - self.renderer.padding).max(0.0)
             / self.renderer.cell_width) as usize;
-        let row = ((self.mouse.y as f32 - self.renderer.padding).max(0.0)
+        let row = ((self.mouse.y as f32 - rect.y - self.renderer.padding).max(0.0)
             / self.renderer.cell_height) as usize;
         (
             col.min(term.columns() - 1),
@@ -157,9 +209,10 @@ impl State {
     }
     fn point(&self) -> (Point, Side) {
         let (col, row) = self.cell();
-        let offset = self.session.terminal.lock().grid().display_offset();
-        let fraction =
-            ((self.mouse.x as f32 - self.renderer.padding) / self.renderer.cell_width).fract();
+        let offset = self.session().terminal.lock().grid().display_offset();
+        let fraction = ((self.mouse.x as f32 - self.active_rect().x - self.renderer.padding)
+            / self.renderer.cell_width)
+            .fract();
         (
             Point::new(Line(row as i32 - offset as i32), Column(col)),
             if fraction < 0.5 {
@@ -175,13 +228,13 @@ impl State {
         }
     }
     fn copy(&mut self, primary: bool) {
-        let selection = self.session.terminal.lock().selection_to_string();
+        let selection = self.session().terminal.lock().selection_to_string();
         if let Some(text) = selection {
             self.clipboard(ClipboardCommand::Copy(text, primary));
         }
     }
     fn scroll(&mut self, scroll: Scroll) {
-        self.session.terminal.lock().scroll_display(scroll);
+        self.session().terminal.lock().scroll_display(scroll);
         self.redraw();
     }
     fn reporting(&self) -> bool {
@@ -194,10 +247,254 @@ impl State {
         }
         self.ime_position = None;
         self.renderer.resize();
-        if let Err(error) = self.session.resize(self.renderer.size()) {
-            self.notice(error.to_string());
+        for (id, rect) in self.placements() {
+            let size = self.renderer.pane_size(rect);
+            let pane = self.panes.get_mut(&id).unwrap();
+            if pane.size != size {
+                if let Err(error) = pane.session.resize(size) {
+                    self.notice = Some(error.to_string());
+                } else {
+                    pane.size = size;
+                }
+            }
         }
         self.redraw();
+    }
+    fn refocus(&mut self) {
+        let active = self.workspace.active();
+        for (id, pane) in &self.panes {
+            let mut term = pane.session.terminal.lock();
+            let focused = *id == active && self.focused;
+            if term.is_focused != focused && term.mode().contains(TermMode::FOCUS_IN_OUT) {
+                let _ = pane.session.input(if focused {
+                    b"\x1b[I".to_vec()
+                } else {
+                    b"\x1b[O".to_vec()
+                });
+            }
+            term.is_focused = focused;
+        }
+        self.selecting = false;
+        self.pressed = None;
+        self.composing = false;
+        self.preedit.clear();
+        self.palette = None;
+        self.search = None;
+        self.search_worker.cancel();
+        self.ime_position = None;
+        self.blink_on = true;
+        self.resize();
+    }
+    fn close_pane(&mut self, id: PaneId) {
+        if let Some(pane) = self.panes.remove(&id) {
+            pane.session.close();
+            std::thread::spawn(move || drop(pane));
+        }
+        self.workspace.close(id);
+        if !self.workspace.tabs.is_empty() {
+            self.refocus();
+        }
+    }
+    fn enabled(&self, action: Action) -> bool {
+        match action {
+            Action::NewTab => {
+                !self.spawning
+                    && self.workspace.tabs.len() < MAX_TABS
+                    && self.panes.len() < MAX_PANES
+            }
+            Action::SplitColumns | Action::SplitRows => {
+                !self.spawning && self.panes.len() < MAX_PANES && {
+                    let r = self.active_rect();
+                    if action == Action::SplitColumns {
+                        r.width
+                            >= 4.0 * self.renderer.padding
+                                + 8.0 * self.renderer.cell_width
+                                + 6.0 * self.renderer.scale
+                    } else {
+                        r.height
+                            >= 4.0 * self.renderer.padding
+                                + 4.0 * self.renderer.cell_height
+                                + 6.0 * self.renderer.scale
+                    }
+                }
+            }
+            Action::NextTab | Action::PreviousTab => self.workspace.tabs.len() > 1,
+            Action::NextPane | Action::PreviousPane => {
+                self.workspace.tabs[self.workspace.active_tab].ids().len() > 1
+            }
+            Action::Copy => self
+                .session()
+                .terminal
+                .lock()
+                .selection_to_string()
+                .is_some(),
+            Action::Reload => !self.reload_pending,
+            _ => true,
+        }
+    }
+    fn palette_items(&self) -> Vec<(Action, &'static str)> {
+        let query = self
+            .palette
+            .as_ref()
+            .map(|(q, _)| q.to_lowercase())
+            .unwrap_or_default();
+        ACTIONS
+            .iter()
+            .filter(|(_, label, _)| label.to_lowercase().contains(&query))
+            .map(|(a, l, _)| (*a, *l))
+            .collect()
+    }
+    fn action(&mut self, action: Action, config: &mut Config) {
+        if !self.enabled(action) {
+            self.notice("Action unavailable in the current layout");
+            return;
+        }
+        match action {
+            Action::NewTab | Action::SplitColumns | Action::SplitRows => {
+                self.spawning = true;
+                let id = self.next_id;
+                self.next_id += 1;
+                let origin = self.workspace.active();
+                let axis = match action {
+                    Action::SplitColumns => Some(Axis::Columns),
+                    Action::SplitRows => Some(Axis::Rows),
+                    _ => None,
+                };
+                let config = config.clone();
+                let cwd = self.directory.clone();
+                let proxy = self.proxy.clone();
+                let size = self.renderer.pane_size(self.active_rect());
+                std::thread::spawn(move || {
+                    let wake = proxy.clone();
+                    let result = Session::spawn(
+                        &config,
+                        size,
+                        &[],
+                        Some(&cwd),
+                        Arc::new(move || {
+                            let _ = wake.send_event(Event::Wake(id));
+                        }),
+                    )
+                    .map_err(|e| format!("{e:#}"));
+                    let _ = proxy.send_event(Event::Spawned {
+                        id,
+                        origin,
+                        axis,
+                        size,
+                        result,
+                    });
+                });
+            }
+            Action::ClosePane => self.close_pane(self.workspace.active()),
+            Action::NextTab | Action::PreviousTab => {
+                self.workspace.cycle_tab(action == Action::NextTab);
+                self.refocus();
+            }
+            Action::NextPane | Action::PreviousPane => {
+                self.workspace.cycle_pane(action == Action::NextPane);
+                self.refocus();
+            }
+            Action::Copy => self.copy(false),
+            Action::Paste => {
+                self.clipboard(ClipboardCommand::Paste(self.workspace.active(), false))
+            }
+            Action::Reload => {
+                self.reload_pending = true;
+                let path = self.config_path.clone();
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = proxy.send_event(Event::Config(
+                        Config::load(&path).map_err(|e| format!("{e:#}")),
+                    ));
+                });
+            }
+            Action::ZoomIn | Action::ZoomOut | Action::ZoomReset => {
+                config.font_size = match action {
+                    Action::ZoomIn => (config.font_size + 1.0).min(72.0),
+                    Action::ZoomOut => (config.font_size - 1.0).max(6.0),
+                    _ => Config::default().font_size,
+                };
+                self.renderer.configure_font(config);
+                self.resize();
+            }
+            Action::Palette => {
+                self.search = None;
+                self.search_worker.cancel();
+                self.palette = Some((String::new(), 0));
+            }
+            Action::Search => {
+                self.palette = None;
+                self.search = Some(SearchUi {
+                    query: String::new(),
+                    status: "Type to search · Enter next · Shift Enter previous · Esc close".into(),
+                    token: 0,
+                    matched: None,
+                });
+            }
+        }
+        self.redraw();
+    }
+
+    fn search_submit(&mut self, next: bool, backward: bool) {
+        let Some(ui) = &self.search else {
+            return;
+        };
+        let query = ui.query.clone();
+        let matched = ui.matched.clone();
+        let token = self.search_worker.cancel();
+        self.search.as_mut().unwrap().token = token;
+        if query.is_empty() {
+            let ui = self.search.as_mut().unwrap();
+            ui.status = "Type to search".into();
+            ui.matched = None;
+            self.session().terminal.lock().selection = None;
+            return;
+        }
+        let pane = self.workspace.active();
+        let session = self.session();
+        let term = session.terminal.lock();
+        let mut origin = Point::new(Line(-(term.grid().display_offset() as i32)), Column(0));
+        if next && let Some(found) = matched {
+            origin = if backward {
+                *found.start()
+            } else {
+                *found.end()
+            };
+            if backward {
+                if origin.column.0 > 0 {
+                    origin.column.0 -= 1;
+                } else {
+                    origin.line.0 -= 1;
+                    origin.column = term.last_column();
+                }
+            } else {
+                origin.column.0 += 1;
+                if origin.column.0 >= term.columns() {
+                    origin.column = Column(0);
+                    origin.line.0 += 1;
+                }
+            }
+            if origin.line < term.topmost_line() {
+                origin = Point::new(term.bottommost_line(), term.last_column());
+            }
+            if origin.line > term.bottommost_line() {
+                origin = Point::new(term.topmost_line(), Column(0));
+            }
+        }
+        drop(term);
+        let request = search::Request {
+            token,
+            pane,
+            query,
+            origin,
+            backward,
+            terminal: session.terminal.clone(),
+            revision: session.shared.revision.clone(),
+        };
+        let result = self.search_worker.submit(request);
+        let ui = self.search.as_mut().unwrap();
+        ui.token = token;
+        ui.status = result.err().unwrap_or_else(|| "Searching…".into());
     }
 }
 
@@ -253,12 +550,44 @@ impl App {
             &self.args.command,
             self.args.directory.as_deref(),
             Arc::new(move || {
-                let _ = proxy.send_event(Event::Wake);
+                let _ = proxy.send_event(Event::Wake(1));
             }),
         )?;
+        let search_proxy = self.proxy.clone();
+        let search_worker = SearchWorker::new(move |result| {
+            let _ = search_proxy.send_event(Event::Search(result));
+        });
+        let watch_proxy = self.proxy.clone();
+        let watcher = ConfigWatcher::start(self.config_path.clone(), move |result| {
+            let _ = watch_proxy.send_event(Event::Config(result));
+        });
+        let watcher_error = watcher
+            .as_ref()
+            .err()
+            .map(|e| format!("Automatic config reload unavailable: {e}"));
         Ok(State {
+            search: None,
+            search_worker,
+            _watcher: watcher.ok(),
+            panes: BTreeMap::from([(
+                1,
+                Pane {
+                    session,
+                    size: renderer.size(),
+                },
+            )]),
+            workspace: Workspace::new(1),
+            next_id: 2,
+            spawning: false,
+            proxy: self.proxy.clone(),
+            directory: self
+                .args
+                .directory
+                .clone()
+                .unwrap_or(std::env::current_dir()?),
+            config_path: self.config_path.clone(),
+            palette: None,
             renderer,
-            session,
             clipboard: clipboard_worker(self.proxy.clone()),
             modifiers: ModifiersState::empty(),
             mouse: PhysicalPosition::new(0.0, 0.0),
@@ -272,7 +601,7 @@ impl App {
             blink_on: true,
             next_blink: Instant::now() + Duration::from_millis(600),
             retry: None,
-            notice: None,
+            notice: watcher_error,
             reload_pending: false,
             wheel_pixels: 0.0,
             title: String::new(),
@@ -302,35 +631,137 @@ impl ApplicationHandler<Event> for App {
         let Some(state) = &mut self.state else {
             return;
         };
+        if state.workspace.tabs.is_empty() {
+            event_loop.exit();
+            return;
+        }
         match event {
-            Event::Wake => {
-                if state.occluded {
-                    state.session.shared.dirty.store(false, Ordering::Release);
-                }
-                let error = state.session.shared.error.lock().unwrap().take();
+            Event::Wake(id) => {
+                let Some(pane) = state.panes.get(&id) else {
+                    return;
+                };
+                let error = pane.session.shared.error.lock().unwrap().take();
+                let exited = pane.session.shared.exited.load(Ordering::Acquire);
                 if let Some(error) = error {
                     state.notice(error);
                 }
-                if state.session.shared.exited.load(Ordering::Acquire) && !self.args.hold {
-                    event_loop.exit();
+                if exited && !self.args.hold {
+                    state.close_pane(id);
                 }
-                state.redraw();
+                if state.workspace.tabs.is_empty() {
+                    event_loop.exit();
+                    return;
+                }
+                if state.workspace.tabs[state.workspace.active_tab]
+                    .ids()
+                    .contains(&id)
+                {
+                    state.redraw();
+                }
             }
-            Event::Paste(Ok(text)) => state.send(input::paste(
-                &text,
-                state.mode().contains(TermMode::BRACKETED_PASTE),
-            )),
-            Event::Paste(Err(error)) | Event::Notice(error) => state.notice(error),
+            Event::Spawned {
+                id,
+                origin,
+                axis,
+                size,
+                result,
+            } => {
+                state.spawning = false;
+                match result {
+                    Ok(session) if state.panes.contains_key(&origin) => {
+                        let previous = state.workspace.active();
+                        state.workspace.focus(origin);
+                        state.panes.insert(id, Pane { session, size });
+                        if let Some(axis) = axis {
+                            state.workspace.split(id, axis);
+                        } else {
+                            state.workspace.add_tab(id);
+                        }
+                        if previous != origin {
+                            state.workspace.focus(previous);
+                        }
+                        state.refocus();
+                        // A short-lived child can exit before its Spawned event is delivered.
+                        if state.panes[&id]
+                            .session
+                            .shared
+                            .exited
+                            .load(Ordering::Acquire)
+                            && !self.args.hold
+                        {
+                            state.close_pane(id);
+                        }
+                    }
+                    Ok(session) => {
+                        session.close();
+                        std::thread::spawn(move || drop(session));
+                    }
+                    Err(error) => state.notice(error),
+                }
+            }
+            Event::Paste(id, Ok(text)) => {
+                if let Some(pane) = state.panes.get(&id) {
+                    let bracketed = pane
+                        .session
+                        .terminal
+                        .lock()
+                        .mode()
+                        .contains(TermMode::BRACKETED_PASTE);
+                    if let Err(e) = pane.session.input(input::paste(&text, bracketed)) {
+                        state.notice(e.to_string());
+                    } else {
+                        let mut term = pane.session.terminal.lock();
+                        term.scroll_display(Scroll::Bottom);
+                        term.selection = None;
+                        drop(term);
+                        state.redraw();
+                    }
+                }
+            }
+            Event::Paste(_, Err(error)) | Event::Notice(error) => state.notice(error),
+            Event::Search(response) => {
+                if let Some(ui) = &mut state.search
+                    && ui.token == response.token
+                    && state.workspace.active() == response.pane
+                {
+                    let pane = &state.panes[&response.pane];
+                    let mut term = pane.session.terminal.lock();
+                    if pane.session.shared.revision.load(Ordering::Acquire) != response.revision {
+                        ui.status = "Output changed; press Enter to search again".into();
+                    } else {
+                        match response.result {
+                            Ok(Some(found)) => {
+                                let mut selection = Selection::new(
+                                    SelectionType::Simple,
+                                    *found.start(),
+                                    Side::Left,
+                                );
+                                selection.update(*found.end(), Side::Right);
+                                term.selection = Some(selection);
+                                term.scroll_to_point(*found.start());
+                                ui.matched = Some(found);
+                                ui.status = "Enter next · Shift Enter previous · Esc close".into();
+                            }
+                            Ok(None) => {
+                                ui.matched = None;
+                                ui.status = "No match".into();
+                                term.selection = None;
+                            }
+                            Err(e) => ui.status = e,
+                        }
+                    }
+                    drop(term);
+                    state.redraw();
+                }
+            }
             Event::Config(result) => {
                 state.reload_pending = false;
                 match result {
                     Ok(config) => {
                         state.blink_on = true;
-                        state
-                            .session
-                            .terminal
-                            .lock()
-                            .set_options(engine_config(&config));
+                        for pane in state.panes.values() {
+                            pane.session.configure(&config);
+                        }
                         state.renderer.configure_font(&config);
                         self.config = config;
                         state.resize();
@@ -348,9 +779,15 @@ impl ApplicationHandler<Event> for App {
         let Some(state) = &mut self.state else {
             return;
         };
+        if state.workspace.tabs.is_empty() {
+            event_loop.exit();
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => {
-                state.session.close();
+                for pane in state.panes.values() {
+                    pane.session.close();
+                }
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
@@ -371,7 +808,7 @@ impl ApplicationHandler<Event> for App {
             }
             WindowEvent::Focused(focused) => {
                 state.focused = focused;
-                state.session.terminal.lock().is_focused = focused;
+                state.session().terminal.lock().is_focused = focused;
                 if state.mode().contains(TermMode::FOCUS_IN_OUT) {
                     state.report(if focused {
                         b"\x1b[I".to_vec()
@@ -395,7 +832,21 @@ impl ApplicationHandler<Event> for App {
             WindowEvent::Ime(Ime::Commit(text)) => {
                 state.preedit.clear();
                 state.composing = false;
-                state.send(text.into_bytes());
+                if let Some(ui) = &mut state.search {
+                    if ui.query.len() + text.len() <= 256 {
+                        ui.query.push_str(&text);
+                        state.search_submit(false, false);
+                    }
+                    state.redraw();
+                } else if let Some((query, selected)) = &mut state.palette {
+                    if query.len() + text.len() <= 256 {
+                        query.push_str(&text);
+                        *selected = 0;
+                    }
+                    state.redraw();
+                } else {
+                    state.send(text.into_bytes());
+                }
             }
             WindowEvent::Ime(Ime::Disabled) => {
                 state.preedit.clear();
@@ -412,30 +863,80 @@ impl ApplicationHandler<Event> for App {
                 }
                 let mods = state.modifiers;
                 let key = &event.logical_key;
-                if mods.control_key() && mods.shift_key() && !mods.alt_key() && !mods.super_key() {
-                    match key.as_ref() {
-                        Key::Character("c" | "C") => {
-                            state.copy(false);
-                            return;
-                        }
-                        Key::Character("v" | "V") => {
-                            state.clipboard(ClipboardCommand::Paste(false));
-                            return;
-                        }
-                        Key::Character("r" | "R") => {
-                            if !state.reload_pending {
-                                state.reload_pending = true;
-                                let path = self.config_path.clone();
-                                let proxy = self.proxy.clone();
-                                std::thread::spawn(move || {
-                                    let result = Config::load(&path).map_err(|e| format!("{e:#}"));
-                                    let _ = proxy.send_event(Event::Config(result));
-                                });
-                            }
-                            return;
-                        }
-                        _ => (),
+                if state.search.is_some() {
+                    if *key == Key::Named(NamedKey::Escape) {
+                        state.search = None;
+                        state.search_worker.cancel();
+                        state.redraw();
+                        return;
                     }
+                    if *key == Key::Named(NamedKey::Enter) {
+                        state.search_submit(true, mods.shift_key());
+                        state.redraw();
+                        return;
+                    }
+                    if *key == Key::Named(NamedKey::Backspace) {
+                        state.search.as_mut().unwrap().query.pop();
+                        state.search_submit(false, false);
+                        state.redraw();
+                        return;
+                    }
+                    if !mods.control_key() && !mods.alt_key() && !mods.super_key() {
+                        if let Some(text) = event.text.as_deref() {
+                            let ui = state.search.as_mut().unwrap();
+                            if ui.query.len() + text.len() <= 256 {
+                                ui.query.push_str(text);
+                                state.search_submit(false, false);
+                            }
+                        }
+                        state.redraw();
+                        return;
+                    }
+                }
+                if state.palette.is_some() {
+                    let items = state.palette_items();
+                    let (query, selected) = state.palette.as_mut().unwrap();
+                    match key {
+                        Key::Named(NamedKey::Escape) => state.palette = None,
+                        Key::Named(NamedKey::ArrowDown) => {
+                            *selected = (*selected + 1).min(items.len().saturating_sub(1))
+                        }
+                        Key::Named(NamedKey::ArrowUp) => *selected = selected.saturating_sub(1),
+                        Key::Named(NamedKey::Backspace) => {
+                            query.pop();
+                            *selected = 0;
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            let action = items.get(*selected).map(|(a, _)| *a);
+                            state.palette = None;
+                            if let Some(action) = action {
+                                state.action(action, &mut self.config);
+                            }
+                        }
+                        _ => {
+                            if !mods.control_key()
+                                && !mods.alt_key()
+                                && !mods.super_key()
+                                && let Some(text) = event.text.as_deref()
+                                && query.len() + text.len() <= 256
+                            {
+                                query.push_str(text);
+                                *selected = 0;
+                            }
+                        }
+                    }
+                    state.redraw();
+                    if state.workspace.tabs.is_empty() {
+                        event_loop.exit();
+                    }
+                    return;
+                }
+                if let Some(action) = actions::resolve(key, mods, &self.config.keybindings) {
+                    state.action(action, &mut self.config);
+                    if state.workspace.tabs.is_empty() {
+                        event_loop.exit();
+                    }
+                    return;
                 }
                 if mods.shift_key() && !mods.control_key() && !mods.alt_key() {
                     match key {
@@ -455,25 +956,7 @@ impl ApplicationHandler<Event> for App {
                             state.scroll(Scroll::Bottom);
                             return;
                         }
-                        Key::Named(NamedKey::Insert) => {
-                            state.clipboard(ClipboardCommand::Paste(false));
-                            return;
-                        }
                         _ => (),
-                    }
-                }
-                if mods.control_key() && !mods.alt_key() {
-                    let new_size = match key.as_ref() {
-                        Key::Character("+" | "=") => Some(self.config.font_size + 1.0),
-                        Key::Character("-") => Some(self.config.font_size - 1.0),
-                        Key::Character("0") => Some(Config::default().font_size),
-                        _ => None,
-                    };
-                    if let Some(size) = new_size {
-                        self.config.font_size = size.clamp(6.0, 72.0);
-                        state.renderer.configure_font(&self.config);
-                        state.resize();
-                        return;
                     }
                 }
                 if *key == Key::Named(NamedKey::Escape) {
@@ -491,14 +974,20 @@ impl ApplicationHandler<Event> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let previous = state.cell();
                 state.mouse = position;
+                if state.palette.is_some() {
+                    return;
+                }
                 let current = state.cell();
                 if state.selecting {
                     let (point, side) = state.point();
-                    if let Some(selection) = state.session.terminal.lock().selection.as_mut() {
+                    if let Some(selection) = state.session().terminal.lock().selection.as_mut() {
                         selection.update(point, side);
                     }
                     state.redraw();
                 } else if current != previous
+                    && state
+                        .active_rect()
+                        .contains(position.x as f32, position.y as f32)
                     && state.reporting()
                     && (state.mode().contains(TermMode::MOUSE_MOTION)
                         || (state.mode().contains(TermMode::MOUSE_DRAG) && state.pressed.is_some()))
@@ -525,8 +1014,39 @@ impl ApplicationHandler<Event> for App {
                 ..
             } => {
                 let pressed = button_state == ElementState::Pressed;
+                if state.palette.is_some() {
+                    return;
+                }
+                if pressed && button == MouseButton::Left {
+                    let header = state.renderer.header_height(state.workspace.tabs.len());
+                    if state.mouse.y < (header as f64) {
+                        let width = state.renderer.window.inner_size().width as f64
+                            / state.workspace.tabs.len() as f64;
+                        state.workspace.active_tab =
+                            ((state.mouse.x / width) as usize).min(state.workspace.tabs.len() - 1);
+                        state.refocus();
+                        return;
+                    }
+                    if let Some((id, _)) = state
+                        .placements()
+                        .into_iter()
+                        .find(|(_, r)| r.contains(state.mouse.x as f32, state.mouse.y as f32))
+                        && id != state.workspace.active()
+                    {
+                        state.workspace.focus(id);
+                        state.refocus();
+                    }
+                }
                 if pressed {
+                    if !state
+                        .active_rect()
+                        .contains(state.mouse.x as f32, state.mouse.y as f32)
+                    {
+                        return;
+                    }
                     state.pressed = Some(button);
+                } else if state.pressed != Some(button) {
+                    return;
                 }
                 if state.reporting() {
                     let code = match button {
@@ -559,7 +1079,7 @@ impl ApplicationHandler<Event> for App {
                             .unwrap_or(1);
                         state.last_click = Some((now, cell, clicks));
                         let (point, side) = state.point();
-                        state.session.terminal.lock().selection = Some(Selection::new(
+                        state.session().terminal.lock().selection = Some(Selection::new(
                             match clicks {
                                 2 => SelectionType::Semantic,
                                 3 => SelectionType::Lines,
@@ -576,13 +1096,20 @@ impl ApplicationHandler<Event> for App {
                     }
                     state.redraw();
                 } else if button == MouseButton::Middle && pressed {
-                    state.clipboard(ClipboardCommand::Paste(true));
+                    state.clipboard(ClipboardCommand::Paste(state.workspace.active(), true));
                 }
                 if !pressed {
                     state.pressed = None;
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if state.palette.is_some()
+                    || !state
+                        .active_rect()
+                        .contains(state.mouse.x as f32, state.mouse.y as f32)
+                {
+                    return;
+                }
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => (y * 3.0) as i32,
                     MouseScrollDelta::PixelDelta(delta) => {
@@ -627,15 +1154,30 @@ impl ApplicationHandler<Event> for App {
                 }
             }
             WindowEvent::RedrawRequested if !state.occluded => {
-                state.session.shared.dirty.store(false, Ordering::Release);
-                let exited = state.session.shared.exited.load(Ordering::Acquire);
-                if exited && !self.args.hold {
-                    event_loop.exit();
-                    return;
-                }
-                let snapshot =
-                    Snapshot::capture(&state.session.terminal.lock(), &self.config, state.blink_on);
-                let title = state.session.shared.title.lock().unwrap().clone();
+                let active = state.workspace.active();
+                let frames: Vec<_> = state
+                    .placements()
+                    .into_iter()
+                    .map(|(id, rect)| {
+                        let pane = &state.panes[&id];
+                        pane.session.shared.dirty.store(false, Ordering::Release);
+                        PaneFrame {
+                            rect,
+                            snapshot: Snapshot::capture(
+                                &pane.session.terminal.lock(),
+                                &self.config,
+                                state.blink_on && id == active,
+                            ),
+                            active: id == active,
+                            preedit: if id == active {
+                                state.preedit.clone()
+                            } else {
+                                String::new()
+                            },
+                        }
+                    })
+                    .collect();
+                let title = state.session().shared.title.lock().unwrap().clone();
                 if state.title != title {
                     state
                         .renderer
@@ -643,22 +1185,86 @@ impl ApplicationHandler<Event> for App {
                         .set_title(&format!("{title} — vibeterm"));
                     state.title = title;
                 }
-                let status = state.notice.clone().unwrap_or_else(|| if exited { "  process exited · close the window to finish".into() } else if snapshot.offset > 0 { format!("  HISTORY  ↑{}    ·    Shift End  return to prompt", snapshot.offset) } else { format!("  vibeterm   /   {} × {}      Ctrl Shift C  copy    Ctrl Shift V  paste    Ctrl +/−  font", snapshot.columns, snapshot.rows) });
-                if let Some((col, row, _)) = snapshot.cursor
+                let current = frames.iter().find(|f| f.active).unwrap();
+                let status = state
+                    .search
+                    .as_ref()
+                    .map(|ui| format!("Find > {}{}  ·  {}", ui.query, state.preedit, ui.status))
+                    .or_else(|| state.notice.clone())
+                    .unwrap_or_else(|| {
+                        if current.snapshot.offset > 0 {
+                            format!(
+                                "HISTORY ↑{} · Shift End returns to prompt",
+                                current.snapshot.offset
+                            )
+                        } else {
+                            format!(
+                                "vibeterm / pane {} · {} × {} · Ctrl Shift P commands",
+                                active, current.snapshot.columns, current.snapshot.rows
+                            )
+                        }
+                    });
+                if let Some((col, row, _)) = current.snapshot.cursor
                     && state.ime_position != Some((col, row))
                 {
                     state.ime_position = Some((col, row));
                     state.renderer.window.set_ime_cursor_area(
                         PhysicalPosition::new(
-                            state.renderer.padding + col as f32 * state.renderer.cell_width,
-                            state.renderer.padding + (row + 1) as f32 * state.renderer.cell_height,
+                            current.rect.x
+                                + state.renderer.padding
+                                + col as f32 * state.renderer.cell_width,
+                            current.rect.y
+                                + state.renderer.padding
+                                + (row + 1) as f32 * state.renderer.cell_height,
                         ),
                         PhysicalSize::new(state.renderer.cell_width, state.renderer.cell_height),
                     );
                 }
+                let tabs: Vec<_> = state
+                    .workspace
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tab)| TabLabel {
+                        text: format!(
+                            "{}  {}",
+                            index + 1,
+                            state.panes[&tab.active]
+                                .session
+                                .shared
+                                .title
+                                .lock()
+                                .unwrap()
+                        ),
+                        active: index == state.workspace.active_tab,
+                    })
+                    .collect();
+                let overlay = state.palette.as_ref().map(|(query, selected)| Overlay {
+                    title: format!("Commands > {query}{}", state.preedit),
+                    selected: *selected,
+                    rows: state
+                        .palette_items()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (action, label))| {
+                            format!(
+                                "{} {}   {}{}",
+                                if i == *selected { ">" } else { " " },
+                                label,
+                                actions::label(*action, &self.config.keybindings),
+                                if state.enabled(*action) {
+                                    ""
+                                } else {
+                                    "  [unavailable]"
+                                }
+                            )
+                        })
+                        .chain(std::iter::once("↑↓ choose · Enter run · Esc close".into()))
+                        .collect(),
+                });
                 match state
                     .renderer
-                    .draw(&snapshot, &self.config, &status, &state.preedit)
+                    .draw(&frames, &self.config, &status, &tabs, overlay.as_ref())
                 {
                     Ok(true) => {
                         state.retry = None;
@@ -690,7 +1296,8 @@ impl ApplicationHandler<Event> for App {
         let Some(state) = &mut self.state else {
             return;
         };
-        let blink = self.config.cursor_blink && state.focused && !state.occluded;
+        let blink =
+            self.config.cursor_blink && state.focused && !state.occluded && state.palette.is_none();
         if blink && Instant::now() >= state.next_blink {
             state.blink_on = !state.blink_on;
             state.next_blink = Instant::now() + Duration::from_millis(600);

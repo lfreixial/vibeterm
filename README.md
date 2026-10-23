@@ -3,13 +3,13 @@
 A native Linux terminal in Rust, with a real shell PTY and GPU text rendering.
 Graphite surfaces, readable text, a quiet teal accent, and no continuous idle animation.
 
-**Early single-pane release, not yet a daily driver.** M0 and the M1 implementation
-are present. Real Bash input, resize, Unicode/color rendering, and `less` were tested
+**Early multi-pane release; daily-driver acceptance is still in progress.** Tabs,
+splits, history search, a command palette, and live configuration are implemented. Real Bash input, resize, Unicode/color rendering, and `less` were tested
 on the desktop. The owner has confirmed selection/copy and middle-click paste work.
 Broader clipboard/backend coverage, IME, and mixed-monitor scaling still need manual
-acceptance. Tabs, splits, search, and a command palette are the next milestone.
+acceptance. Workspace features have also passed the X11 desktop checks.
 
-![Actual release build rendering the ANSI/Unicode fixture](docs/screenshot.png)
+![Actual application with tabs and nested splits](docs/workspace.png)
 
 ## Run
 
@@ -24,7 +24,9 @@ This checkout already has a release executable:
 
 `-e` must be the final application option. Arguments are passed directly to the
 program. Default shell: configured `shell`, then `$SHELL`, then `/bin/sh`. Default
-directory: the launch directory. Shell exit closes the window unless `--hold` is set.
+directory: the launch directory. New panes launch the configured shell in the initial
+working directory; they do not repeat a CLI `-e` command or track shell directory changes.
+Shell exit closes its pane unless `--hold` is set; closing the last pane closes the window.
 
 ## Build
 
@@ -60,7 +62,9 @@ env -u WAYLAND_DISPLAY WINIT_UNIX_BACKEND=x11 ./target/release/vibeterm
 - Mouse selection, word/line selection, clipboard/primary selection, legacy mouse
   reporting, application cursor keys, bracketed paste, and focus reporting.
 - IME preedit/commit plumbing, scale-aware layout, font zoom, validated TOML,
-  safe manual reload, status/error footer, explicit commands/working directories.
+  automatic safe reload, status/error footer, explicit commands/working directories.
+- Tabs and nested splits, independent shells, mouse/keyboard focus switching.
+- Background scrollback search, searchable command palette, configurable shortcuts.
 - Bounded input queues/caches, coalesced wakeups, sleeping idle loop, child reaping.
 
 See [compatibility](docs/compatibility.md) for what was actually verified. Shaping
@@ -74,10 +78,19 @@ Copy [config.example.toml](config.example.toml) to
 All settings are optional; no config is needed. Unknown keys/invalid values are
 rejected. `--config PATH` chooses a file; `--check-config` validates it.
 Invalid reloads keep the old settings and running shell, showing an error in the footer.
-Reload is manual; automatic file watching belongs to M2.
+Changes reload automatically after a short debounce, including atomic file replacements.
+Deleting the file restores defaults. Ctrl+Shift+R also reloads explicitly. Files are
+limited to 64 KiB; existing shells keep running when the configured shell changes.
 
 | Action | Shortcut |
 | --- | --- |
+| New tab | Ctrl+Shift+T |
+| Split side by side / above and below | Ctrl+Shift+E / O |
+| Close active pane | Ctrl+Shift+W |
+| Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |
+| Next / previous pane | Ctrl+Shift+Right / Left |
+| Search history | Ctrl+Shift+F |
+| Command palette | Ctrl+Shift+P |
 | Copy selection | Ctrl+Shift+C |
 | Paste clipboard | Ctrl+Shift+V or Shift+Insert |
 | Paste primary selection | Middle click |
@@ -89,6 +102,18 @@ Reload is manual; automatic file watching belongs to M2.
 | Reset font to built-in default | Ctrl+0 |
 | Reload configuration | Ctrl+Shift+R |
 | Clear footer notice (also sends Escape) | Escape |
+
+Click a pane or tab to focus it. Limits are eight tabs and 32 total panes; splits
+need enough room for useful cells. Split dividers are fixed at equal proportions.
+Search is literal and case-insensitive unless the query includes uppercase letters.
+Enter finds the next match, Shift+Enter the previous match, and Escape closes search.
+Output changes during a scan cancel its result; Enter retries. Queries are limited
+to 256 UTF-8 bytes. Search selects one match at a time, which can be copied normally.
+
+The palette filters commands as you type, shows unavailable actions, and supports
+Up/Down, Enter, and Escape. Override shortcuts in `[keybindings]`; see the example
+config. Empty strings disable bindings. Duplicate or invalid shortcuts reject the
+entire reload. Palette/search consume their own navigation keys while open.
 
 Releasing a selection updates primary selection; `copy_on_select` also updates the
 regular clipboard. Paste is capped at 256 KiB and strips ESC to prevent escape from
@@ -102,7 +127,7 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo build --examples --locked
-python3 scripts/x11-smoke.py
+python3 scripts/x11-smoke.py target/debug/vibeterm --workspace
 # Optional pointer/clipboard checks, restoring pointer position afterward:
 python3 scripts/x11-smoke.py target/debug/vibeterm --pointer
 cargo run --release --locked --example replay -- 200000
@@ -121,7 +146,7 @@ submission from physical input latency. No competitor performance claim is made.
 are at its top. A desktop entry and original icon are included. Packaging has been
 syntax/metadata checked only, not installed or published to AUR.
 
-Finish M1 manual acceptance, then M2 adds tabs, splits, scrollback search, a command
-palette, automatic safe config reload, and broader robustness testing. Shell-aware
+Next: complete manual input/backend acceptance, stress-test multi-pane workloads,
+and polish selection, accessibility, and packaging. Shell-aware
 navigation/workspaces follow in M3, external-process plugins in M4. AI is deferred.
 See [status](docs/status.md) and [architecture](docs/architecture.md).

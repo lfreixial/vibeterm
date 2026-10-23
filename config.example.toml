@@ -1,5 +1,5 @@
 # ~/.config/vibeterm/config.toml (or $XDG_CONFIG_HOME/vibeterm/config.toml)
-# All fields are optional. Ctrl+Shift+R reloads without restarting the shell.
+# All fields are optional. Changes reload automatically; Ctrl+Shift+R also reloads.
 # Invalid reloads keep the last valid configuration and show an error in the footer.
 font_family = "monospace" # Or an installed font, e.g. "DejaVu Sans Mono"
 font_size = 15.0         # Logical pixels; 6–72
@@ -13,3 +13,24 @@ foreground = "#d8dee9"
 background = "#171b24"
 accent = "#80cbc4"
 # shell = "/bin/zsh"   # Default: $SHELL, then /bin/sh; arguments use CLI -e
+
+# Optional shortcut overrides. Unspecified actions retain their defaults.
+# Use Ctrl, Shift, Alt, Super plus a character or named key (Tab, ArrowLeft, F1...).
+# An empty string disables an action's shortcut. Conflicting shortcuts are rejected.
+# [keybindings]
+# new_tab = "Alt+t"
+# split_columns = "Ctrl+Shift+e"
+# split_rows = "Ctrl+Shift+o"
+# close_pane = "Ctrl+Shift+w"
+# next_tab = "Ctrl+Tab"
+# previous_tab = "Ctrl+Shift+Tab"
+# next_pane = "Ctrl+Shift+ArrowRight"
+# previous_pane = "Ctrl+Shift+ArrowLeft"
+# search = "Ctrl+Shift+f"
+# palette = "Ctrl+Shift+p"
+# copy = "Ctrl+Shift+c"
+# paste = "Ctrl+Shift+v"
+# reload = "Ctrl+Shift+r"
+# zoom_in = "Ctrl+="
+# zoom_out = "Ctrl+-"
+# zoom_reset = "Ctrl+0"

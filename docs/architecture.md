@@ -14,10 +14,12 @@ only redundant UI notifications are coalesced. Input has 32 bounded queue entrie
 256 KiB maximum per request, and one partially written buffer. Full user-input
 queues reject the whole new request with an error; full engine-reply queues stop
 the session explicitly. Clipboard requests have a separate eight-entry queue and
-worker retaining ownership. At most one config reload read runs at a time.
+worker retaining ownership. Paste responses retain the originating pane ID.
+One manual config read can be pending alongside the automatic watcher.
 
 Close sends SIGHUP to the foreground job group and shell, gives the shell 200 ms,
-then uses SIGKILL if necessary and reaps it. Joining happens during final teardown.
+then uses SIGKILL if necessary and reaps it. Closing an individual pane joins on
+a cleanup thread; closing the window signals all panes before final teardown.
 Intentionally daemonized/disowned jobs are outside this policy. There is no session
 supervisor, persistence, or guaranteed graceful shutdown after a GUI-process crash.
 
@@ -25,11 +27,24 @@ supervisor, persistence, or guaranteed graceful shutdown after a GUI-process cra
 Cosmic Text supplies system-font discovery, fallback, shaping, and rasterization.
 Shaped cell buffers have a 4,096-entry LRU; CPU raster cache resets above 8,192
 entries; the GPU atlas has library/device limits. Geometry caps at 500×200 cells,
-history defaults to 10,000 lines and caps at 100,000. These are count bounds, not
+each pane has its own grid; history defaults to 10,000 lines and caps at 100,000. These are count bounds, not
 a universal RAM budget. Wide cells occupy two columns; combining marks shape with
 their base. Cross-cell ligatures/full bidi layout are not implemented.
 
+`workspace.rs` holds the pure binary split tree, tab order and stable pane IDs.
 `app.rs` owns native events, focus, IME, selection, clipboard requests, and reload.
+Visible panes share one GPU surface; each grid and glyph run is clipped to its pane.
+Only the focused pane shows a cursor. Hidden panes keep parsing but do not redraw;
+exit notifications bypass damage coalescing so hidden tabs close promptly.
+
+`search.rs` scans history on one cancellable worker with an eight-request queue.
+Engine locks cover approximately 64-line chunks plus query-length overlap. Search
+results carry a generation, pane ID and terminal revision; edits, pane switches and
+output changes prevent stale selection application. Search never clones history.
+`watch.rs` uses Linux inotify plus a shutdown socket, debounces relevant changes for
+150 ms, bounds files at 64 KiB and parses off the UI thread. Valid reloads apply to
+all panes; shell changes apply to future panes. Neither worker polls while idle.
+
 Idle uses `ControlFlow::Wait`; optional blinking schedules 600 ms wakeups only while
 focused/visible. Redundant resize/title/IME-position updates are suppressed. The
 first desktop run exposed a configure/redraw feedback loop; this was fixed before

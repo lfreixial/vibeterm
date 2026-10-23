@@ -27,7 +27,9 @@ probes its wake socket before spawning, returning a clear error if blocked.
 Compilation/non-PTY tests work without desktop access; GUI tests ran outside the sandbox.
 
 The X11 smoke script finds its PID-owned window and sends keyboard events directly
-to it. Optional pointer tests check window ancestry before clicking and restore
+to it. Build examples and pass `--workspace` for tabs/splits/search/palette/live
+config checks; these also exercise the clipboard without pointer automation.
+Optional pointer tests check window ancestry before clicking and restore
 position afterward. KWin prevented pointer targeting here; manual acceptance remains.
 
 Fixtures: `visual-fixture.py` emits ANSI/Unicode; `throughput.py` emits a fixed load;

@@ -1,6 +1,7 @@
 use crate::{
     config::{Config, parse_color},
     session::{Size, Terminal},
+    workspace::Rect,
 };
 use alacritty_terminal::{
     grid::Dimensions,
@@ -212,6 +213,48 @@ fn status_buffer(
     )
 }
 
+fn intersection(a: Rect, b: Rect) -> Rect {
+    let x = a.x.max(b.x);
+    let y = a.y.max(b.y);
+    Rect {
+        x,
+        y,
+        width: ((a.x + a.width).min(b.x + b.width) - x).max(0.0),
+        height: ((a.y + a.height).min(b.y + b.height) - y).max(0.0),
+    }
+}
+fn bounds(rect: Rect) -> TextBounds {
+    TextBounds {
+        left: rect.x.ceil() as i32,
+        top: rect.y.ceil() as i32,
+        right: (rect.x + rect.width).floor() as i32,
+        bottom: (rect.y + rect.height).floor() as i32,
+    }
+}
+
+pub struct PaneFrame {
+    pub rect: Rect,
+    pub snapshot: Snapshot,
+    pub active: bool,
+    pub preedit: String,
+}
+pub struct TabLabel {
+    pub text: String,
+    pub active: bool,
+}
+pub struct Overlay {
+    pub title: String,
+    pub rows: Vec<String>,
+    pub selected: usize,
+}
+struct PlacedText {
+    buffer: Arc<Buffer>,
+    x: f32,
+    y: f32,
+    bounds: TextBounds,
+    color: [u8; 3],
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -356,13 +399,31 @@ impl Renderer {
             .max(1.0);
     }
 
-    pub fn size(&self) -> Size {
+    pub fn header_height(&self, tabs: usize) -> f32 {
+        if tabs > 1 {
+            (32.0 * self.scale).round()
+        } else {
+            0.0
+        }
+    }
+    pub fn content_rect(&self, tabs: usize) -> Rect {
         let size = self.window.inner_size();
+        let y = self.header_height(tabs);
+        Rect {
+            x: 0.0,
+            y,
+            width: size.width as f32,
+            height: (size.height as f32 - y - self.footer_height).max(0.0),
+        }
+    }
+    pub fn size(&self) -> Size {
+        self.pane_size(self.content_rect(1))
+    }
+    pub fn pane_size(&self, rect: Rect) -> Size {
         Size {
-            columns: (((size.width as f32 - 2.0 * self.padding) / self.cell_width) as usize)
+            columns: (((rect.width - 2.0 * self.padding).max(0.0) / self.cell_width) as usize)
                 .clamp(2, 500),
-            rows: (((size.height as f32 - 2.0 * self.padding - self.footer_height)
-                / self.cell_height) as usize)
+            rows: (((rect.height - 2.0 * self.padding).max(0.0) / self.cell_height) as usize)
                 .clamp(1, 200),
             cell_width: self.cell_width as u16,
             cell_height: self.cell_height as u16,
@@ -436,12 +497,31 @@ impl Renderer {
         }
     }
 
+    fn ui_text(&mut self, text: &str, config: &Config, rect: Rect, color: [u8; 3]) -> PlacedText {
+        let buffer = Arc::new(status_buffer(
+            &mut self.font_system,
+            text,
+            config,
+            self.scale,
+            rect.width,
+        ));
+        let y = rect.y + (rect.height - buffer.metrics().line_height) / 2.0;
+        PlacedText {
+            buffer,
+            x: rect.x,
+            y,
+            bounds: bounds(rect),
+            color,
+        }
+    }
+
     pub fn draw(
         &mut self,
-        snapshot: &Snapshot,
+        panes: &[PaneFrame],
         config: &Config,
         status: &str,
-        preedit: &str,
+        tabs: &[TabLabel],
+        overlay: Option<&Overlay>,
     ) -> Result<bool> {
         let started = Instant::now();
         let size = self.window.inner_size();
@@ -467,104 +547,265 @@ impl Renderer {
         let footer_y = (size.height as f32 - self.footer_height).max(0.0);
         let mut vertices = Vec::new();
         let mut glyphs = Vec::new();
-        for cell in &snapshot.cells {
-            let x = self.padding + cell.column as f32 * self.cell_width;
-            let y = self.padding + cell.row as f32 * self.cell_height;
-            if cell.bg != snapshot.background {
-                self.rectangle(
-                    &mut vertices,
-                    x,
-                    y,
-                    self.cell_width,
-                    self.cell_height,
-                    cell.bg,
-                );
-            }
-            let width = self.cell_width
-                * if cell.flags.contains(Flags::WIDE_CHAR) {
-                    2.0
+        for pane in panes.iter().filter(|_| overlay.is_none()) {
+            let snapshot = &pane.snapshot;
+            let rect = pane.rect;
+            self.rectangle(
+                &mut vertices,
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                snapshot.background,
+            );
+            if panes.len() > 1 {
+                let color = if pane.active {
+                    parse_color(&config.accent)?
                 } else {
-                    1.0
+                    [57, 65, 79]
                 };
-            if cell.flags.intersects(Flags::ALL_UNDERLINES) {
                 self.rectangle(
                     &mut vertices,
-                    x,
-                    y + self.cell_height - 2.0 * self.scale,
-                    width,
-                    self.scale,
-                    cell.fg,
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    self.scale * if pane.active { 2.0 } else { 1.0 },
+                    color,
                 );
             }
-            if cell.flags.contains(Flags::STRIKEOUT) {
-                self.rectangle(
-                    &mut vertices,
+            let origin_x = rect.x + self.padding;
+            let origin_y = rect.y + self.padding;
+            let clip = Rect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height.min(footer_y - rect.y).max(0.0),
+            };
+            let mut solids = Vec::new();
+            for cell in &snapshot.cells {
+                let x = origin_x + cell.column as f32 * self.cell_width;
+                let y = origin_y + cell.row as f32 * self.cell_height;
+                let width = self.cell_width
+                    * if cell.flags.contains(Flags::WIDE_CHAR) {
+                        2.0
+                    } else {
+                        1.0
+                    };
+                if cell.bg != snapshot.background {
+                    solids.push((
+                        Rect {
+                            x,
+                            y,
+                            width: self.cell_width,
+                            height: self.cell_height,
+                        },
+                        cell.bg,
+                    ));
+                }
+                if cell.flags.intersects(Flags::ALL_UNDERLINES) {
+                    solids.push((
+                        Rect {
+                            x,
+                            y: y + self.cell_height - 2.0 * self.scale,
+                            width,
+                            height: self.scale,
+                        },
+                        cell.fg,
+                    ));
+                }
+                if cell.flags.contains(Flags::STRIKEOUT) {
+                    solids.push((
+                        Rect {
+                            x,
+                            y: y + self.cell_height * 0.55,
+                            width,
+                            height: self.scale,
+                        },
+                        cell.fg,
+                    ));
+                }
+                if cell.text.is_empty() {
+                    continue;
+                }
+                let key = GlyphKey {
+                    text: cell.text.clone(),
+                    bold: cell.flags.contains(Flags::BOLD),
+                    italic: cell.flags.contains(Flags::ITALIC),
+                    wide: cell.flags.contains(Flags::WIDE_CHAR),
+                };
+                let buffer = if let Some(buffer) = self.glyphs.get(&key) {
+                    buffer.clone()
+                } else {
+                    let buffer =
+                        Arc::new(self.buffer(&key.text, config, key.bold, key.italic, Some(width)));
+                    self.glyphs.put(key, buffer.clone());
+                    buffer
+                };
+                glyphs.push(PlacedText {
+                    buffer,
                     x,
-                    y + self.cell_height * 0.55,
-                    width,
-                    self.scale,
-                    cell.fg,
-                );
+                    y,
+                    bounds: bounds(intersection(
+                        clip,
+                        Rect {
+                            x,
+                            y,
+                            width,
+                            height: self.cell_height,
+                        },
+                    )),
+                    color: cell.fg,
+                });
             }
-            if cell.text.is_empty() {
-                continue;
+            if let Some((col, row, shape)) = snapshot.cursor {
+                let x = origin_x + col as f32 * self.cell_width;
+                let y = origin_y + row as f32 * self.cell_height;
+                let color = parse_color(&config.accent)?;
+                match shape {
+                    CursorShape::Beam => solids.push((
+                        Rect {
+                            x,
+                            y,
+                            width: 2.0 * self.scale,
+                            height: self.cell_height,
+                        },
+                        color,
+                    )),
+                    CursorShape::Underline => solids.push((
+                        Rect {
+                            x,
+                            y: y + self.cell_height - 2.0 * self.scale,
+                            width: self.cell_width,
+                            height: 2.0 * self.scale,
+                        },
+                        color,
+                    )),
+                    _ => (),
+                }
+                if !pane.preedit.is_empty() {
+                    let width = (rect.x + rect.width - x - self.padding).max(0.0);
+                    solids.push((
+                        Rect {
+                            x,
+                            y,
+                            width: width.min(pane.preedit.chars().count() as f32 * self.cell_width),
+                            height: self.cell_height,
+                        },
+                        [44, 57, 69],
+                    ));
+                    glyphs.push(PlacedText {
+                        buffer: Arc::new(self.buffer(
+                            &pane.preedit,
+                            config,
+                            false,
+                            false,
+                            Some(width),
+                        )),
+                        x,
+                        y,
+                        bounds: bounds(intersection(
+                            clip,
+                            Rect {
+                                x,
+                                y,
+                                width,
+                                height: self.cell_height,
+                            },
+                        )),
+                        color,
+                    });
+                }
             }
-            let key = GlyphKey {
-                text: cell.text.clone(),
-                bold: cell.flags.contains(Flags::BOLD),
-                italic: cell.flags.contains(Flags::ITALIC),
-                wide: cell.flags.contains(Flags::WIDE_CHAR),
-            };
-            let buffer = if let Some(buffer) = self.glyphs.get(&key) {
-                buffer.clone()
-            } else {
-                let buffer =
-                    Arc::new(self.buffer(&key.text, config, key.bold, key.italic, Some(width)));
-                self.glyphs.put(key, buffer.clone());
-                buffer
-            };
-            glyphs.push((buffer, x, y, width, cell.fg));
+            for (r, color) in solids {
+                let r = intersection(r, clip);
+                self.rectangle(&mut vertices, r.x, r.y, r.width, r.height, color);
+            }
         }
-        if let Some((col, row, shape)) = snapshot.cursor {
-            let x = self.padding + col as f32 * self.cell_width;
-            let y = self.padding + row as f32 * self.cell_height;
-            let color = parse_color(&config.accent)?;
-            match shape {
-                CursorShape::Beam => self.rectangle(
+        let header = self.header_height(tabs.len());
+        if header > 0.0 {
+            let width = size.width as f32 / tabs.len() as f32;
+            for (index, tab) in tabs.iter().enumerate() {
+                let x = index as f32 * width;
+                self.rectangle(
                     &mut vertices,
                     x,
-                    y,
-                    2.0 * self.scale,
-                    self.cell_height,
-                    color,
-                ),
-                CursorShape::Underline => self.rectangle(
-                    &mut vertices,
-                    x,
-                    y + self.cell_height - 2.0 * self.scale,
-                    self.cell_width,
-                    2.0 * self.scale,
-                    color,
-                ),
-                _ => (),
+                    0.0,
+                    width,
+                    header,
+                    if tab.active {
+                        [39, 47, 59]
+                    } else {
+                        [21, 25, 33]
+                    },
+                );
+                if tab.active {
+                    self.rectangle(
+                        &mut vertices,
+                        x,
+                        header - 2.0 * self.scale,
+                        width,
+                        2.0 * self.scale,
+                        parse_color(&config.accent)?,
+                    );
+                }
+                let label = format!("{} {}", if tab.active { "●" } else { "○" }, tab.text);
+                glyphs.push(self.ui_text(
+                    &label,
+                    config,
+                    Rect {
+                        x: x + 8.0 * self.scale,
+                        y: 0.0,
+                        width: (width - 16.0 * self.scale).max(0.0),
+                        height: header,
+                    },
+                    [216, 222, 233],
+                ));
             }
-            if !preedit.is_empty() {
-                let width = (size.width as f32 - x - self.padding).max(self.cell_width);
+        }
+        if let Some(overlay) = overlay {
+            let width = (size.width as f32 - 24.0 * self.scale)
+                .min(760.0 * self.scale)
+                .max(0.0);
+            let x = (size.width as f32 - width) / 2.0;
+            let mut y = header + 12.0 * self.scale;
+            let visible = ((footer_y - y) / (28.0 * self.scale)) as usize;
+            let first = (overlay.selected + 1).saturating_sub(visible.saturating_sub(1));
+            for (index, line) in std::iter::once(&overlay.title)
+                .chain(overlay.rows.iter().skip(first))
+                .enumerate()
+            {
+                let height = 28.0 * self.scale;
+                if y + height > footer_y {
+                    break;
+                }
                 self.rectangle(
                     &mut vertices,
                     x,
                     y,
-                    width.min(preedit.chars().count() as f32 * self.cell_width),
-                    self.cell_height,
-                    [44, 57, 69],
-                );
-                glyphs.push((
-                    Arc::new(self.buffer(preedit, config, false, false, Some(width))),
-                    x,
-                    y,
                     width,
-                    color,
+                    height,
+                    if index == 0 {
+                        [40, 54, 66]
+                    } else {
+                        [26, 33, 43]
+                    },
+                );
+                glyphs.push(self.ui_text(
+                    line,
+                    config,
+                    Rect {
+                        x: x + 12.0 * self.scale,
+                        y,
+                        width: (width - 24.0 * self.scale).max(0.0),
+                        height,
+                    },
+                    if index == 0 {
+                        [128, 203, 196]
+                    } else {
+                        [216, 222, 233]
+                    },
                 ));
+                y += height;
             }
         }
         self.rectangle(
@@ -583,15 +824,17 @@ impl Renderer {
             self.scale,
             [44, 51, 64],
         );
-        let footer_width = (size.width as f32 - 2.0 * self.padding).max(0.0);
-        let footer = status_buffer(
-            &mut self.font_system,
+        glyphs.push(self.ui_text(
             status,
             config,
-            self.scale,
-            footer_width,
-        );
-        let footer_top = footer_y + (self.footer_height - footer.metrics().line_height) / 2.0;
+            Rect {
+                x: self.padding,
+                y: footer_y,
+                width: (size.width as f32 - 2.0 * self.padding).max(0.0),
+                height: self.footer_height,
+            },
+            [151, 166, 185],
+        ));
         self.text
             .prepare(
                 &self.device,
@@ -599,36 +842,15 @@ impl Renderer {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                glyphs
-                    .iter()
-                    .map(|(buffer, x, y, width, rgb)| TextArea {
-                        buffer,
-                        left: *x,
-                        top: *y,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: *x as i32,
-                            top: *y as i32,
-                            right: (*x + width).ceil() as i32,
-                            bottom: ((*y + self.cell_height).ceil() as i32).min(footer_y as i32),
-                        },
-                        default_color: Color::rgb(rgb[0], rgb[1], rgb[2]),
-                        custom_glyphs: &[],
-                    })
-                    .chain(std::iter::once(TextArea {
-                        buffer: &footer,
-                        left: self.padding,
-                        top: footer_top,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: self.padding as i32,
-                            top: footer_y.ceil() as i32,
-                            right: (self.padding + footer_width).floor() as i32,
-                            bottom: size.height as i32,
-                        },
-                        default_color: Color::rgb(151, 166, 185),
-                        custom_glyphs: &[],
-                    })),
+                glyphs.iter().map(|t| TextArea {
+                    buffer: &t.buffer,
+                    left: t.x,
+                    top: t.y,
+                    scale: 1.0,
+                    bounds: t.bounds,
+                    default_color: Color::rgb(t.color[0], t.color[1], t.color[2]),
+                    custom_glyphs: &[],
+                }),
                 &mut self.swash,
             )
             .context("Prepare glyph atlas")?;
@@ -642,7 +864,7 @@ impl Renderer {
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
-            let rgb = snapshot.background.map(|c| f64::from(c) / 255.0);
+            let rgb = parse_color(&config.background)?.map(|c| f64::from(c) / 255.0);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terminal frame"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {

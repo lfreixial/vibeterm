@@ -5,6 +5,7 @@ Requires a desktop, libX11, xprop, ImageMagick, and a built debug/release binary
 No Python packages required. Artifacts live in a temporary directory.
 Pass --pointer to also test mouse selection and clipboard. This temporarily moves
 the pointer into the test window and restores its original position afterward.
+Pass --workspace to test tabs, splits, search, palette and automatic reload too.
 """
 import ctypes as C
 import os
@@ -219,6 +220,12 @@ try:
     type_text("printf '\\033[2J\\033[H'; python3 " + str(Path(__file__).with_name("visual-fixture.py").resolve()) + "\n")
     time.sleep(0.5)
     subprocess.run(["import", "-window", hex(window), str(work / "terminal.png")], check=True)
+    if "--workspace" in sys.argv:
+        from workspace_checks import run
+        def capture(name):
+            time.sleep(0.15)
+            subprocess.run(["import", "-window", hex(window), str(work / name)], check=True)
+        run(work, config, key, type_text, wait_for, capture, binary, env)
     type_text("exit\n")
     assert process.wait(timeout=5) == 0
     print("PASS: shell exit closes window and reaps process", flush=True)

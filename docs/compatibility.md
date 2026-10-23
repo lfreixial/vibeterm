@@ -27,8 +27,12 @@ Rust 1.90.0. Engine tests, real PTYs, and desktop interaction are distinguished 
 | Bracketed paste envelope | Encoding-tested | ESC filtering and line endings asserted |
 | Focus reporting | Implemented, not manually tested | Bypasses history/selection changes |
 | IME | Implemented, not tested with real IME | Preedit/commit and candidate positioning |
-| Fractional / mixed-monitor scaling | Not tested | Layout recomputes from scale factor |
+| Fractional / mixed-monitor scaling | Partial | Native launch at scale 1.5 succeeds; monitor transitions and visual/input acceptance remain pending |
 | Config validation / rejected reload | Tested on X11 | Visible rejection, live shell survives, valid reload succeeds |
+| Tabs / both split directions / focus / closure | Tested on X11 | Targeted independent-shell markers, hidden exit, screenshots |
+| History search / selected-match copy | Tested on X11 | Literal history match copied through real clipboard |
+| Command palette / remapped shortcuts | Tested on X11 | Palette action and live Alt+T override |
+| Automatic config watching / atomic replacement | Tested | Watcher tests and desktop PTY geometry checks |
 | Idle redraw | Tested | Feedback loop fixed; baseline recorded separately |
 | Minimize / surface loss | Handled, not fault-injection tested | Zero-size skip and surface retry |
 | Native accessibility | Not implemented | No screen-reader accessibility tree |
@@ -44,8 +48,9 @@ Rust 1.90.0. Engine tests, real PTYs, and desktop interaction are distinguished 
    is not implemented yet.
 4. Paste multiline text in Bash/Zsh/Fish and inspect it before Enter. Test real
    keyboard modifier combinations and key repeat.
-5. Load a temporary config, make its font size/color invalid, and Ctrl+Shift+R.
-   The old settings/session should survive with an error. Correct it and reload.
+5. Load a temporary config, make its font size/color invalid, and save it.
+   The old settings/session should survive with an error. Correct it and save again.
+   Also test explicit Ctrl+Shift+R reload.
 6. Compose/commit using a real IME, checking for duplicate input. Move between
    monitors with differing fractional scales and resize.
 7. Minimize 30 seconds with blink off, restore, and check output/CPU. Close with a
@@ -59,3 +64,9 @@ release build passed. An isolated X11 window at 72 px font / 3× line spacing wa
 captured and visually inspected; the status text stays inside its bar. The broader
 X11 script did not complete in this desktop session (resize-step timeout), so this
 follow-up is a focused rendering check, not a fresh pass of the full desktop suite.
+
+Workspace follow-up (2026-10-23): the complete X11 script, including resize and
+`--workspace` acceptance checks, passed. The resize timeout above did not recur;
+this does not establish its original cause. See [workspace capture](workspace.png),
+[palette](palette.png) and [history search](search.png). Native Wayland IME and
+mixed-monitor interaction remain separate manual acceptance items.

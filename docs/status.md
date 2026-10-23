@@ -29,16 +29,30 @@ Wayland keyboard/TUI interaction, real IME composition, mixed-monitor scaling,
 application keypad support, and a fuller terminal capability audit. KWin blocked the
 test driver's pointer targeting, so those interactions were not marked passed.
 
-## M2 — next, not complete
+## M2 — workspace features implemented; acceptance remains partial
 
-Existing foundations: fallback fonts, IME plumbing, font zoom, safe manual reload,
-status/error footer, and Linux package files.
+Tabs and nested equal splits run independent shells, with keyboard/mouse focus,
+per-tab focus restoration, pane closure and hidden-child exit handling. Limits:
+eight tabs, 32 panes, minimum dimensions for creating a split. Session startup and
+pane teardown run off the UI thread. Tabs are not saved across application restarts.
 
-Remaining: tabs/splits and focus routing, scrollback search, searchable command
-palette, automatic config watching, configurable shortcuts, opacity, cursor/focus
-polish, selection autoscroll, broader text/input testing, performance budgets,
-package installation validation, and native accessibility. Finish M1 acceptance
-before expanding the feature surface.
+Literal smart-case scrollback search runs on a cancellable worker in bounded line
+ranges; output revisions reject stale selections. The command palette filters
+actions, shows availability and current shortcuts, and scrolls its selected row
+into view in small windows. TOML shortcut overrides are validated for conflicts.
+An inotify worker watches config changes and atomic replacement without idle polling;
+invalid edits retain the previous settings and sessions.
+
+The X11 workspace checks exercise independent shells, both split directions,
+focus restoration, pane/tab closure, history search copied through the real clipboard,
+palette execution, automatic and atomic config reload, invalid reload recovery,
+custom shortcuts, and hidden-pane exit. Screenshots were visually inspected.
+The earlier intermittent resize timeout did not recur in the follow-up full run;
+its original cause is not established.
+
+Remaining: M1 backend/input acceptance above, draggable dividers, selection
+autoscroll, opacity, accessibility, broader multi-pane performance/stress checks,
+and package installation validation. Shell-directory tracking belongs to M3.
 
 ## M3 / M4 — not started
 

@@ -16,7 +16,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, SyncSender},
     },
     thread::{self, JoinHandle},
@@ -27,7 +27,7 @@ pub const MAX_INPUT: usize = 256 * 1024;
 pub type Terminal = Term<Listener>;
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Size {
     pub columns: usize,
     pub rows: usize,
@@ -57,6 +57,7 @@ impl Size {
 }
 
 pub struct Shared {
+    pub revision: Arc<AtomicU64>,
     pub dirty: AtomicBool,
     pub exited: AtomicBool,
     pub title: Mutex<String>,
@@ -204,6 +205,7 @@ impl Session {
         let pid = child.process_id().context("Missing child PID")? as i32;
         let (tx, rx) = mpsc::sync_channel(32);
         let shared = Arc::new(Shared {
+            revision: Arc::new(AtomicU64::new(0)),
             dirty: AtomicBool::new(false),
             exited: AtomicBool::new(false),
             stop: AtomicBool::new(false),
@@ -276,6 +278,7 @@ impl Session {
                             Ok(Command::Resize(size)) => {
                                 let mut terminal = term.lock();
                                 terminal.resize(size);
+                                state.revision.fetch_add(1, Ordering::Release);
                                 if let Err(error) = master.resize(size.pty()) {
                                     state.fail(format!("PTY resize: {error}"));
                                 }
@@ -337,7 +340,11 @@ impl Session {
                     // SAFETY: the master outlives this read, and bytes is writable for its full length.
                     let count = unsafe { libc::read(fd, bytes.as_mut_ptr().cast(), bytes.len()) };
                     if count > 0 {
-                        parser.advance(&mut *term.lock(), &bytes[..count as usize]);
+                        {
+                            let mut terminal = term.lock();
+                            parser.advance(&mut *terminal, &bytes[..count as usize]);
+                            state.revision.fetch_add(1, Ordering::Release);
+                        }
                         state.notify();
                     } else if count == 0
                         || std::io::Error::last_os_error().raw_os_error() == Some(libc::EIO)
@@ -378,11 +385,19 @@ impl Session {
                     .sync_timeout()
                     .is_some_and(|deadline| deadline <= Instant::now())
                 {
-                    parser.stop_sync(&mut *term.lock());
+                    {
+                        let mut terminal = term.lock();
+                        parser.stop_sync(&mut *terminal);
+                        state.revision.fetch_add(1, Ordering::Release);
+                    }
                     state.notify();
                 }
             }
-            parser.stop_sync(&mut *term.lock());
+            {
+                let mut terminal = term.lock();
+                parser.stop_sync(&mut *terminal);
+                state.revision.fetch_add(1, Ordering::Release);
+            }
             if !child_done.load(Ordering::Acquire) {
                 // Closing a session hangs up the foreground process group and shell.
                 // SAFETY: positive IDs originate from this PTY; never signal our own group.
@@ -414,7 +429,8 @@ impl Session {
                 state.fail(format!("Wait for child: {error}"));
             }
             state.exited.store(true, Ordering::Release);
-            state.notify();
+            // Exit must wake the UI even when a hidden pane already has pending damage.
+            (state.wake)();
         });
         Ok(Self {
             terminal,
@@ -437,6 +453,12 @@ impl Session {
         })?;
         signal(&self.signal);
         Ok(())
+    }
+
+    pub fn configure(&self, config: &Config) {
+        let mut terminal = self.terminal.lock();
+        terminal.set_options(engine_config(config));
+        self.shared.revision.fetch_add(1, Ordering::Release);
     }
 
     pub fn resize(&self, size: Size) -> Result<()> {

@@ -96,3 +96,89 @@ fn large_input_is_rejected_atomically() {
     session.input(b"done\r".to_vec()).unwrap();
     wait_until(|| session.shared.exited.load(Ordering::Acquire));
 }
+
+#[test]
+fn background_search_finds_literal_text_in_old_history_and_wraps() {
+    use alacritty_terminal::index::Point;
+    use vibeterm::search::{Request, SearchWorker};
+    let session = spawn(
+        "printf '[needle].\\r\\n'; i=0; while [ $i -lt 300 ]; do printf 'filler\\r\\n'; i=$((i+1)); done; printf '[needle].\\r\\n'",
+    );
+    wait_until(|| session.shared.exited.load(Ordering::Acquire));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = SearchWorker::new(move |response| {
+        tx.send(response).unwrap();
+    });
+    for (backward, start_at_end, expected_history) in [
+        (false, false, true),
+        (true, true, false),
+        (false, true, true),
+    ] {
+        let term = session.terminal.lock();
+        let origin = if start_at_end {
+            Point::new(term.bottommost_line(), term.last_column())
+        } else {
+            Point::new(term.topmost_line(), Column(0))
+        };
+        drop(term);
+        let token = worker.cancel();
+        worker
+            .submit(Request {
+                token,
+                pane: 1,
+                query: "[needle].".into(),
+                origin,
+                backward,
+                terminal: session.terminal.clone(),
+                revision: session.shared.revision.clone(),
+            })
+            .unwrap();
+        let response = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let matched = response.result.unwrap().unwrap();
+        assert_eq!(matched.start().line.0 < 0, expected_history);
+        assert_eq!(
+            session
+                .terminal
+                .lock()
+                .bounds_to_string(*matched.start(), *matched.end()),
+            "[needle]."
+        );
+    }
+    let cancelled = worker.cancel();
+    let latest = worker.cancel();
+    for token in [cancelled, latest] {
+        worker
+            .submit(Request {
+                token,
+                pane: 1,
+                query: "[needle].".into(),
+                origin: Point::default(),
+                backward: false,
+                terminal: session.terminal.clone(),
+                revision: session.shared.revision.clone(),
+            })
+            .unwrap();
+    }
+    let response = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(
+        response.token, latest,
+        "Cancelled requests must not publish a result"
+    );
+    assert!(response.result.unwrap().is_some());
+    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+}
+
+#[test]
+fn independent_sessions_route_input_and_close_without_affecting_each_other() {
+    let first = spawn("printf 'READY\\n'; read value; printf 'FIRST:%s\\n' \"$value\"");
+    let second = spawn("printf 'READY\\n'; read value; printf 'SECOND:%s\\n' \"$value\"");
+    wait_until(|| visible(&first).contains("READY") && visible(&second).contains("READY"));
+    first.input(b"one\r".to_vec()).unwrap();
+    wait_until(|| first.shared.exited.load(Ordering::Acquire));
+    assert!(!second.shared.exited.load(Ordering::Acquire));
+    second.input(b"two\r".to_vec()).unwrap();
+    wait_until(|| second.shared.exited.load(Ordering::Acquire));
+    assert!(visible(&first).contains("FIRST:one"));
+    assert!(visible(&second).contains("SECOND:two"));
+    assert!(!visible(&second).contains("FIRST"));
+}

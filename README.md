@@ -1,1 +1,126 @@
 # Vibeterm
+
+A native Linux terminal in Rust, with a real shell PTY and GPU text rendering.
+Graphite surfaces, readable text, a quiet teal accent, and no continuous idle animation.
+
+**Early single-pane release, not yet a daily driver.** M0 and the M1 implementation
+are present. Real Bash input, resize, Unicode/color rendering, and `less` were tested
+on the desktop. Physical mouse/clipboard, IME, and mixed-monitor scaling still need
+manual acceptance. Tabs, splits, search, and a command palette are the next milestone.
+
+![Actual release build rendering the ANSI/Unicode fixture](docs/screenshot.png)
+
+## Run
+
+This checkout already has a release executable:
+
+```sh
+./target/release/vibeterm
+./target/release/vibeterm -d ~/src
+./target/release/vibeterm -e /bin/bash --noprofile --norc
+./target/release/vibeterm --hold -e /usr/bin/printf '%s\n' 'arguments stay separate'
+```
+
+`-e` must be the final application option. Arguments are passed directly to the
+program. Default shell: configured `shell`, then `$SHELL`, then `/bin/sh`. Default
+directory: the launch directory. Shell exit closes the window unless `--hold` is set.
+
+## Build
+
+Rust **1.90.0** is the pinned toolchain/MSRV; `Cargo.lock` pins application dependencies.
+
+```sh
+cargo build --release --locked
+cargo run --release --locked
+```
+
+CachyOS/Arch needs `base-devel`, `pkgconf`, Rust, `wayland`, `libxkbcommon`,
+`fontconfig`, X11 libraries, `vulkan-icd-loader`, an appropriate graphics driver,
+and an installed monospace font. `mesa` supplies the OpenGL fallback. Verified build
+environment: Wayland 1.26, libxkbcommon 1.13.2, Fontconfig 2.18.3, Mesa/RADV 26.2.4.
+AMD testing used `vulkan-radeon`. No system packages were installed or shell startup files edited.
+
+The build session installed Rust only under `/tmp`; the binary needs no Rust
+installation to run. To rebuild using that temporary compiler, see
+[development instructions](docs/development.md).
+
+Wayland is selected when available. Exercise X11/XWayland with:
+
+```sh
+env -u WAYLAND_DISPLAY WINIT_UNIX_BACKEND=x11 ./target/release/vibeterm
+```
+
+## Implemented
+
+- Native winit window; wgpu Vulkan/OpenGL renderer; Glyphon glyph atlas.
+- Alacritty terminal parser/state, real PTY, truecolor/256 colors, alternate screen,
+  scroll regions, bounded scrollback, wide cells, and combining characters.
+- Cosmic Text fallback/shaping, bold/italic, underline, inverse, dim, strikeout.
+- Mouse selection, word/line selection, clipboard/primary selection, legacy mouse
+  reporting, application cursor keys, bracketed paste, and focus reporting.
+- IME preedit/commit plumbing, scale-aware layout, font zoom, validated TOML,
+  safe manual reload, status/error footer, explicit commands/working directories.
+- Bounded input queues/caches, coalesced wakeups, sleeping idle loop, child reaping.
+
+See [compatibility](docs/compatibility.md) for what was actually verified. Shaping
+is per terminal cell: cross-cell ligatures and full bidi layout are not promised.
+There is no native accessibility tree or screen-reader support yet.
+
+## Configure
+
+Copy [config.example.toml](config.example.toml) to
+`$XDG_CONFIG_HOME/vibeterm/config.toml` (normally `~/.config/vibeterm/config.toml`).
+All settings are optional; no config is needed. Unknown keys/invalid values are
+rejected. `--config PATH` chooses a file; `--check-config` validates it.
+Invalid reloads keep the old settings and running shell, showing an error in the footer.
+Reload is manual; automatic file watching belongs to M2.
+
+| Action | Shortcut |
+| --- | --- |
+| Copy selection | Ctrl+Shift+C |
+| Paste clipboard | Ctrl+Shift+V or Shift+Insert |
+| Paste primary selection | Middle click |
+| Select text / word / line | Drag / double click / triple click |
+| Select while a TUI captures mouse | Hold Shift |
+| Scroll history | Wheel or Shift+PageUp / PageDown |
+| Oldest history / return to prompt | Shift+Home / End |
+| Increase / decrease font | Ctrl++ / Ctrl+− |
+| Reset font to built-in default | Ctrl+0 |
+| Reload configuration | Ctrl+Shift+R |
+| Clear footer notice (also sends Escape) | Escape |
+
+Releasing a selection updates primary selection; `copy_on_select` also updates the
+regular clipboard. Paste is capped at 256 KiB and strips ESC to prevent escape from
+the bracketed-paste envelope. Clipboard I/O runs off the UI thread. Wayland clipboard
+availability depends on compositor data-control support or XWayland.
+
+## Verify
+
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo build --examples --locked
+python3 scripts/x11-smoke.py
+# Optional pointer/clipboard checks, restoring pointer position afterward:
+python3 scripts/x11-smoke.py target/debug/vibeterm --pointer
+cargo run --release --locked --example replay -- 200000
+python3 scripts/measure.py
+```
+
+PTY tests need real process/socket permissions. Desktop tests require display/GPU
+access; the X11 script also uses `xprop`, ImageMagick, and libXtst. KWin prevented
+synthetic pointer targeting in this session; manual mouse acceptance remains pending.
+[Performance results](docs/performance.md) distinguish synthetic parsing and frame
+submission from physical input latency. No competitor performance claim is made.
+
+## Packaging and next steps
+
+[packaging/PKGBUILD](packaging/PKGBUILD) builds a local source archive; instructions
+are at its top. A desktop entry and original icon are included. Packaging has been
+syntax/metadata checked only, not installed or published to AUR.
+
+Finish M1 manual acceptance, then M2 adds tabs, splits, scrollback search, a command
+palette, automatic safe config reload, and broader robustness testing. Shell-aware
+navigation/workspaces follow in M3, external-process plugins in M4. AI is deferred.
+See [status](docs/status.md) and [architecture](docs/architecture.md).

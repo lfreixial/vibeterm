@@ -1,0 +1,38 @@
+# Development
+
+Normal checks:
+
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo build --release --locked
+```
+
+The environment initially had no Rust compiler. It was installed only in `/tmp`,
+without editing shell startup files or installing system packages. Reuse it before temporary files expire:
+
+```sh
+export RUSTUP_HOME=/tmp/vibeterm-rustup
+export CARGO_HOME=/tmp/vibeterm-cargo
+export PATH=/tmp/vibeterm-rustup/toolchains/1.90.0-x86_64-unknown-linux-gnu/bin:$PATH
+export RUSTC=/tmp/vibeterm-rustup/toolchains/1.90.0-x86_64-unknown-linux-gnu/bin/rustc
+export RUSTDOC=/tmp/vibeterm-rustup/toolchains/1.90.0-x86_64-unknown-linux-gnu/bin/rustdoc
+cargo test --workspace --locked
+```
+
+The host sandbox blocks wake-socket writes/signals and initially hung PTY tests.
+Those were terminated and passed with real process permissions. Initialization now
+probes its wake socket before spawning, returning a clear error if blocked.
+Compilation/non-PTY tests work without desktop access; GUI tests ran outside the sandbox.
+
+The X11 smoke script finds its PID-owned window and sends keyboard events directly
+to it. Optional pointer tests check window ancestry before clicking and restore
+position afterward. KWin prevented pointer targeting here; manual acceptance remains.
+
+Fixtures: `visual-fixture.py` emits ANSI/Unicode; `throughput.py` emits a fixed load;
+`examples/replay.rs` measures parser throughput alone; `measure.py` samples idle
+CPU/RSS and release diagnostics. Do not equate those figures with physical latency.
+
+The GitHub workflow is added but has not run remotely. Packaging is local only;
+no package installation or AUR publication was performed.

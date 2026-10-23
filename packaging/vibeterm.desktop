@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Vibeterm
+GenericName=Terminal Emulator
+Comment=Native GPU terminal for Linux
+Exec=vibeterm
+TryExec=vibeterm
+Icon=vibeterm
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupNotify=true
+StartupWMClass=vibeterm

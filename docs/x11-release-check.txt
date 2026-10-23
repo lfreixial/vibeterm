@@ -1,0 +1,7 @@
+WARNING: radv is not a conformant Vulkan implementation, testing use only.
+GPU: AMD Radeon RX 9070 XT (RADV GFX1201) / Vulkan / radv
+Window: PhysicalSize { width: 1060, height: 700 }, scale=1, font=monospace 15, grid=114x32, scrollback=10000
+Monitor: PhysicalSize { width: 3840, height: 2160 }, refresh=Some(239977) mHz
+First frame: 69.22 ms (font/GPU setup included; shell readiness not measured)
+Frames presented: 218
+Frame CPU + surface acquisition + submission: n=218, p50=5.919 ms, p95=6.148 ms (not GPU or key-to-photon latency)

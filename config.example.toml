@@ -1,0 +1,15 @@
+# ~/.config/vibeterm/config.toml (or $XDG_CONFIG_HOME/vibeterm/config.toml)
+# All fields are optional. Ctrl+Shift+R reloads without restarting the shell.
+# Invalid reloads keep the last valid configuration and show an error in the footer.
+font_family = "monospace" # Or an installed font, e.g. "DejaVu Sans Mono"
+font_size = 15.0         # Logical pixels; 6–72
+line_spacing = 1.3       # Font-size multiplier; 1–3
+padding = 14.0          # Logical pixels; 0–100
+scrollback = 10000      # Lines; 0–100000
+copy_on_select = false # Primary selection is always updated after a mouse selection
+cursor_shape = "block" # block, beam, underline; applications may override this
+cursor_blink = false   # Off by default: no idle animation wakeups
+foreground = "#d8dee9"
+background = "#171b24"
+accent = "#80cbc4"
+# shell = "/bin/zsh"   # Default: $SHELL, then /bin/sh; arguments use CLI -e

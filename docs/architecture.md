@@ -3,12 +3,17 @@
 `session.rs` owns the engine adapter and PTY. Portable PTY creates the child and
 master; one nonblocking Linux reactor performs all reads, ordered partial writes,
 and resize ioctls. It polls the PTY and a wake socket, sleeping indefinitely when idle.
-There is no competing engine event loop or second PTY reader. A waiter observes
+There is no competing engine event loop or second PTY reader. Each wakeup drains up
+to 64 KiB into a batch for a dedicated parser thread, through an eight-batch (512 KiB)
+queue; a full queue blocks the reactor, so output is never dropped. Kernel TTY reads
+therefore overlap parsing instead of alternating with it (+25–34% throughput). The
+parser thread also owns the synchronized-update timeout, and is drained and joined
+before exit is reported, so all output is parsed first. A waiter observes
 exit with `waitid(WNOWAIT)`; the reactor retains PID ownership until the final reap,
 so shutdown cannot signal a reused shell PID.
 
-Alacritty's fair mutex protects terminal state. Each read parses at most 16 KiB
-under the lock. The renderer snapshots visible cells, releases the lock, then does
+Alacritty's fair mutex protects terminal state. The parser holds it for at most
+16 KiB of input at a time. The renderer snapshots visible cells, releases the lock, then does
 font/GPU work. It never clones history per frame. Output bytes are never discarded;
 only redundant UI notifications are coalesced. Input has 32 bounded queue entries,
 256 KiB maximum per request, and one partially written buffer. Full user-input
@@ -24,6 +29,12 @@ Intentionally daemonized/disowned jobs are outside this policy. There is no sess
 supervisor, persistence, or guaranteed graceful shutdown after a GUI-process crash.
 
 `render.rs` uses wgpu for cell rectangles and Glyphon for cached text in one surface.
+Vulkan is tried first; OpenGL/EGL (≈20 ms and ≈17 MiB more) initialises only if no
+Vulkan adapter exists. Snapshots store a `char` per cell (combining marks allocate),
+skip blank default cells, and UI strings are cached shaped buffers. Startup loads the
+system font database on a thread before the event loop; once the window exists a
+second thread measures the cell and spawns the shell while the GPU initialises.
+The swapchain allows one queued frame (Fifo), since frames are drawn only on change.
 Cosmic Text supplies system-font discovery, fallback, shaping, and rasterization.
 Shaped cell buffers have a 4,096-entry LRU; CPU raster cache resets above 8,192
 entries; the GPU atlas has library/device limits. Geometry caps at 500×200 cells,

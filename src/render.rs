@@ -90,7 +90,8 @@ fn resolve(color: AnsiColor, colors: &Colors, palette: &Palette) -> [u8; 3] {
 pub struct Cell {
     pub column: usize,
     pub row: usize,
-    pub text: String,
+    /// Glyph to draw, or `None` for blanks and spacers.
+    pub glyph: Option<Glyph>,
     pub fg: [u8; 3],
     pub bg: [u8; 3],
     pub flags: Flags,
@@ -157,20 +158,27 @@ impl Snapshot {
                 bg = palette.accent;
                 fg = background;
             }
-            let mut text = String::new();
-            if !cell.flags.intersects(
+            let glyph = (!cell.flags.intersects(
                 Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::HIDDEN,
-            ) && cell.c != ' '
+            ) && cell.c != ' ')
+                .then(|| Glyph {
+                    base: cell.c,
+                    // Combining marks are rare; only those cells allocate.
+                    marks: cell.zerowidth().map(Box::from),
+                });
+            // Blank cells on the default background draw nothing; skip copying them.
+            if glyph.is_none()
+                && bg == background
+                && !cell
+                    .flags
+                    .intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT)
             {
-                text.push(cell.c);
-                if let Some(chars) = cell.zerowidth() {
-                    text.extend(chars);
-                }
+                continue;
             }
             cells.push(Cell {
                 column: indexed.point.column.0,
                 row: row as usize,
-                text,
+                glyph,
                 fg,
                 bg,
                 flags: cell.flags,
@@ -195,9 +203,23 @@ pub struct CellMetrics {
     pub cell_height: f32,
 }
 
+/// A cell's text without per-frame allocation: one character plus any combining marks.
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+pub struct Glyph {
+    pub base: char,
+    pub marks: Option<Box<[char]>>,
+}
+impl Glyph {
+    fn text(&self) -> String {
+        std::iter::once(self.base)
+            .chain(self.marks.iter().flat_map(|marks| marks.iter().copied()))
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 struct GlyphKey {
-    text: String,
+    glyph: Glyph,
     size: u32,
     bold: bool,
     italic: bool,
@@ -226,6 +248,75 @@ fn shape_buffer(
     buffer
 }
 
+fn family(config: &Config) -> Family<'_> {
+    if config.font_family == "monospace" {
+        Family::Monospace
+    } else {
+        Family::Name(&config.font_family)
+    }
+}
+
+/// Cell size of a font, measured from the advance of "M" (terminal fonts are monospace).
+pub fn measure_cell(
+    font_system: &mut FontSystem,
+    config: &Config,
+    scale: f32,
+    font_size: f32,
+) -> CellMetrics {
+    let cell_height = (font_size * config.line_spacing * scale).ceil();
+    let buffer = shape_buffer(
+        font_system,
+        "M",
+        Attrs::new().family(family(config)),
+        Metrics::new(font_size * scale, cell_height),
+        None,
+    );
+    CellMetrics {
+        font_size,
+        cell_width: buffer
+            .layout_runs()
+            .next()
+            .map(|run| run.line_w)
+            .unwrap_or(font_size * scale * 0.6)
+            .round()
+            .max(1.0),
+        cell_height,
+    }
+}
+
+/// Grid that fits a pane rectangle; shared by startup and the renderer so both agree.
+pub fn cells(rect: Rect, padding: f32, metrics: CellMetrics) -> Size {
+    Size {
+        columns: (((rect.width - 2.0 * padding).max(0.0) / metrics.cell_width) as usize)
+            .clamp(2, 500),
+        rows: (((rect.height - 2.0 * padding).max(0.0) / metrics.cell_height) as usize)
+            .clamp(1, 200),
+        cell_width: metrics.cell_width as u16,
+        cell_height: metrics.cell_height as u16,
+    }
+}
+
+fn footer_height(scale: f32) -> f32 {
+    (28.0 * scale).round()
+}
+
+/// Grid of a single-pane window, computable before the GPU is ready.
+pub fn window_cells(
+    width: u32,
+    height: u32,
+    scale: f32,
+    config: &Config,
+    metrics: CellMetrics,
+) -> Size {
+    let rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: width as f32,
+        height: (height as f32 - footer_height(scale)).max(0.0),
+    };
+    cells(rect, (config.padding * scale).round(), metrics)
+}
+
 fn status_buffer(
     font_system: &mut FontSystem,
     text: &str,
@@ -233,16 +324,11 @@ fn status_buffer(
     scale: f32,
     width: f32,
 ) -> Buffer {
-    let family = if config.font_family == "monospace" {
-        Family::Monospace
-    } else {
-        Family::Name(&config.font_family)
-    };
     // UI text follows display scaling, independently of terminal zoom and line spacing.
     shape_buffer(
         font_system,
         text,
-        Attrs::new().family(family),
+        Attrs::new().family(family(config)),
         Metrics::new(11.0 * scale, (16.0 * scale).ceil()),
         Some(width.max(0.0)),
     )
@@ -304,6 +390,7 @@ pub struct Renderer {
     solid: wgpu::RenderPipeline,
     glyphs: LruCache<GlyphKey, Arc<Buffer>>,
     measured: HashMap<u32, CellMetrics>,
+    ui_glyphs: LruCache<(String, u32), Arc<Buffer>>,
     /// Cell size at the window-wide font size.
     font_size: f32,
     pub cell_width: f32,
@@ -318,24 +405,37 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub async fn new(window: Arc<Window>, config: &Config) -> Result<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
-            ..Default::default()
-        });
-        let surface = instance
-            .create_surface(window.clone())
-            .context("Create native GPU surface")?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                compatible_surface: Some(&surface),
-                power_preference: wgpu::PowerPreference::LowPower,
-                force_fallback_adapter: false,
-            })
-            .await
-            .context(
-                "No usable Vulkan/OpenGL adapter. Check your graphics driver and desktop session",
-            )?;
+    /// `fonts` is called once the GPU is ready, so font loading can run concurrently.
+    pub async fn new(
+        window: Arc<Window>,
+        config: &Config,
+        fonts: impl FnOnce() -> FontSystem,
+    ) -> Result<Self> {
+        // OpenGL/EGL initialisation costs ~20 ms and memory; only pay it without Vulkan.
+        let mut found = None;
+        for backends in [wgpu::Backends::VULKAN, wgpu::Backends::GL] {
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                backends,
+                ..Default::default()
+            });
+            let Ok(surface) = instance.create_surface(window.clone()) else {
+                continue;
+            };
+            if let Ok(adapter) = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    compatible_surface: Some(&surface),
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    force_fallback_adapter: false,
+                })
+                .await
+            {
+                found = Some((surface, adapter));
+                break;
+            }
+        }
+        let (surface, adapter) = found.context(
+            "No usable Vulkan/OpenGL adapter. Check your graphics driver and desktop session",
+        )?;
         let info = adapter.get_info();
         let adapter_info = format!("{} / {:?} / {}", info.name, info.backend, info.driver);
         let (device, queue) = adapter
@@ -356,7 +456,9 @@ impl Renderer {
             surface_config.format = *format;
         }
         surface_config.present_mode = wgpu::PresentMode::Fifo;
-        surface_config.desired_maximum_frame_latency = 2;
+        // Frames are drawn only on change, so a deeper queue adds latency without
+        // smoothing anything; Fifo still paces output floods to the display.
+        surface_config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &surface_config);
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
@@ -400,7 +502,7 @@ impl Renderer {
             device,
             queue,
             surface_config,
-            font_system: FontSystem::new(),
+            font_system: fonts(),
             swash: SwashCache::new(),
             viewport,
             atlas,
@@ -408,6 +510,7 @@ impl Renderer {
             solid,
             glyphs: LruCache::new(NonZeroUsize::new(4096).unwrap()),
             measured: HashMap::new(),
+            ui_glyphs: LruCache::new(NonZeroUsize::new(128).unwrap()),
             font_size: config.font_size,
             cell_width: 9.0,
             cell_height: 20.0,
@@ -426,8 +529,9 @@ impl Renderer {
     pub fn configure_font(&mut self, config: &Config) {
         self.scale = self.window.scale_factor() as f32;
         self.padding = (config.padding * self.scale).round();
-        self.footer_height = (28.0 * self.scale).round();
+        self.footer_height = footer_height(self.scale);
         self.glyphs.clear();
+        self.ui_glyphs.clear();
         self.measured.clear();
         self.swash = SwashCache::new();
         let metrics = self.measure(config, config.font_size);
@@ -441,23 +545,7 @@ impl Renderer {
         if let Some(metrics) = self.measured.get(&font_size.to_bits()) {
             return *metrics;
         }
-        let cell_height = (font_size * config.line_spacing * self.scale).ceil();
-        let probe = CellMetrics {
-            font_size,
-            cell_width: 0.0,
-            cell_height,
-        };
-        let buffer = self.buffer("M", config, probe, false, false, None);
-        let metrics = CellMetrics {
-            cell_width: buffer
-                .layout_runs()
-                .next()
-                .map(|run| run.line_w)
-                .unwrap_or(font_size * self.scale * 0.6)
-                .round()
-                .max(1.0),
-            ..probe
-        };
+        let metrics = measure_cell(&mut self.font_system, config, self.scale, font_size);
         self.measured.insert(font_size.to_bits(), metrics);
         metrics
     }
@@ -492,14 +580,7 @@ impl Renderer {
         self.pane_size(self.content_rect(1), self.metrics())
     }
     pub fn pane_size(&self, rect: Rect, metrics: CellMetrics) -> Size {
-        Size {
-            columns: (((rect.width - 2.0 * self.padding).max(0.0) / metrics.cell_width) as usize)
-                .clamp(2, 500),
-            rows: (((rect.height - 2.0 * self.padding).max(0.0) / metrics.cell_height) as usize)
-                .clamp(1, 200),
-            cell_width: metrics.cell_width as u16,
-            cell_height: metrics.cell_height as u16,
-        }
+        cells(rect, self.padding, metrics)
     }
 
     pub fn resize(&mut self) {
@@ -525,16 +606,11 @@ impl Renderer {
         italic: bool,
         width: Option<f32>,
     ) -> Buffer {
-        let family = if config.font_family == "monospace" {
-            Family::Monospace
-        } else {
-            Family::Name(&config.font_family)
-        };
         shape_buffer(
             &mut self.font_system,
             text,
             Attrs::new()
-                .family(family)
+                .family(family(config))
                 .weight(if bold { Weight::BOLD } else { Weight::NORMAL })
                 .style(if italic { Style::Italic } else { Style::Normal }),
             Metrics::new(metrics.font_size * self.scale, metrics.cell_height),
@@ -571,13 +647,22 @@ impl Renderer {
     }
 
     fn ui_text(&mut self, text: &str, config: &Config, rect: Rect, color: [u8; 3]) -> PlacedText {
-        let buffer = Arc::new(status_buffer(
-            &mut self.font_system,
-            text,
-            config,
-            self.scale,
-            rect.width,
-        ));
+        // Status/tab/palette text rarely changes between frames; reshaping it every
+        // frame used to cost more than drawing the whole terminal grid.
+        let key = (text.to_owned(), rect.width.to_bits());
+        let buffer = if let Some(buffer) = self.ui_glyphs.get(&key) {
+            buffer.clone()
+        } else {
+            let buffer = Arc::new(status_buffer(
+                &mut self.font_system,
+                text,
+                config,
+                self.scale,
+                rect.width,
+            ));
+            self.ui_glyphs.put(key, buffer.clone());
+            buffer
+        };
         let y = rect.y + (rect.height - buffer.metrics().line_height) / 2.0;
         PlacedText {
             buffer,
@@ -699,11 +784,11 @@ impl Renderer {
                         cell.fg,
                     ));
                 }
-                if cell.text.is_empty() {
+                let Some(glyph) = &cell.glyph else {
                     continue;
-                }
+                };
                 let key = GlyphKey {
-                    text: cell.text.clone(),
+                    glyph: glyph.clone(),
                     bold: cell.flags.contains(Flags::BOLD),
                     italic: cell.flags.contains(Flags::ITALIC),
                     wide: cell.flags.contains(Flags::WIDE_CHAR),
@@ -713,7 +798,7 @@ impl Renderer {
                     buffer.clone()
                 } else {
                     let buffer = Arc::new(self.buffer(
-                        &key.text,
+                        &key.glyph.text(),
                         config,
                         metrics,
                         key.bold,

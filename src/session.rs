@@ -1,4 +1,5 @@
 //! One PTY owner, one byte stream, bounded input, coalesced UI notifications.
+//! A reactor thread owns all PTY I/O; a parser thread applies output in order.
 use crate::config::{Config, CursorShape};
 use alacritty_terminal::{
     event::{Event, EventListener},
@@ -24,6 +25,12 @@ use std::{
 };
 
 pub const MAX_INPUT: usize = 256 * 1024;
+/// Largest PTY read batch handed to the parser thread.
+const OUTPUT_CHUNK: usize = 64 * 1024;
+/// Batches queued for parsing before the reactor stops reading (512 KiB in total).
+const OUTPUT_CHUNKS: usize = 8;
+/// Bytes parsed per terminal lock, bounding how long the renderer can wait.
+const MAX_LOCKED_PARSE: usize = 16 * 1024;
 pub type Terminal = Term<Listener>;
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 
@@ -255,12 +262,54 @@ impl Session {
             signal(&child_signal);
             result
         });
+        // Output pipeline: the reactor below only moves bytes and a parser thread applies
+        // them, so kernel TTY reads overlap parsing instead of alternating with it.
+        let (output_tx, output_rx) = mpsc::sync_channel::<Vec<u8>>(OUTPUT_CHUNKS);
+        let parse_term = terminal.clone();
+        let parse_state = shared.clone();
+        let parser_thread = thread::spawn(move || {
+            let (term, state) = (parse_term, parse_state);
+            let mut parser = Processor::<ansi::StdSyncHandler>::new();
+            loop {
+                let deadline = parser.sync_timeout().sync_timeout();
+                let chunk = match deadline {
+                    Some(deadline) => match output_rx
+                        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    {
+                        Ok(chunk) => Some(chunk),
+                        Err(mpsc::RecvTimeoutError::Timeout) => None,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    },
+                    None => match output_rx.recv() {
+                        Ok(chunk) => Some(chunk),
+                        Err(_) => break,
+                    },
+                };
+                for slice in chunk
+                    .iter()
+                    .flat_map(|chunk| chunk.chunks(MAX_LOCKED_PARSE))
+                {
+                    let mut terminal = term.lock();
+                    parser.advance(&mut *terminal, slice);
+                    state.revision.fetch_add(1, Ordering::Release);
+                }
+                // Steady output must not postpone an expired synchronized update.
+                if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+                    let mut terminal = term.lock();
+                    parser.stop_sync(&mut *terminal);
+                    state.revision.fetch_add(1, Ordering::Release);
+                }
+                state.notify();
+            }
+            let mut terminal = term.lock();
+            parser.stop_sync(&mut *terminal);
+            state.revision.fetch_add(1, Ordering::Release);
+        });
         let worker = thread::spawn(move || {
             let master = pair.master;
-            let mut parser = Processor::<ansi::StdSyncHandler>::new();
             let mut pending = Vec::new();
             let mut offset = 0;
-            let mut bytes = [0u8; 16384];
+            let mut wake = [0u8; 64];
             loop {
                 if state.stop.load(Ordering::Acquire) {
                     break;
@@ -290,20 +339,10 @@ impl Session {
                         }
                     }
                 }
-                let timeout = parser
-                    .sync_timeout()
-                    .sync_timeout()
-                    .map(|deadline| {
-                        deadline
-                            .saturating_duration_since(Instant::now())
-                            .as_millis()
-                            .min(i32::MAX as u128) as i32
-                    })
-                    .unwrap_or(-1);
                 let timeout = if child_done.load(Ordering::Acquire) {
                     0
                 } else {
-                    timeout
+                    -1
                 };
                 let mut fds = [
                     libc::pollfd {
@@ -329,32 +368,43 @@ impl Session {
                 if fds[1].revents & libc::POLLIN != 0 {
                     // SAFETY: valid writable buffer and live wake descriptor.
                     while unsafe {
-                        libc::read(
-                            signal_rx.as_raw_fd(),
-                            bytes.as_mut_ptr().cast(),
-                            bytes.len(),
-                        )
+                        libc::read(signal_rx.as_raw_fd(), wake.as_mut_ptr().cast(), wake.len())
                     } > 0
                     {}
                 }
                 if fds[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
-                    // SAFETY: the master outlives this read, and bytes is writable for its full length.
-                    let count = unsafe { libc::read(fd, bytes.as_mut_ptr().cast(), bytes.len()) };
-                    let error = std::io::Error::last_os_error();
-                    if count > 0 {
-                        {
-                            let mut terminal = term.lock();
-                            parser.advance(&mut *terminal, &bytes[..count as usize]);
-                            state.revision.fetch_add(1, Ordering::Release);
+                    // Drain what is available, up to one chunk; a keystroke echo is sent on
+                    // as soon as the PTY runs dry, so batching adds no interactive latency.
+                    let mut chunk = Vec::with_capacity(OUTPUT_CHUNK);
+                    let mut closed = false;
+                    while chunk.len() < OUTPUT_CHUNK {
+                        let spare = chunk.spare_capacity_mut();
+                        // SAFETY: the master outlives this read and `spare` is writable
+                        // for its full length; only the bytes read are marked initialised.
+                        let count =
+                            unsafe { libc::read(fd, spare.as_mut_ptr().cast(), spare.len()) };
+                        let error = std::io::Error::last_os_error();
+                        if count > 0 {
+                            // SAFETY: the kernel initialised exactly `count` spare bytes.
+                            unsafe { chunk.set_len(chunk.len() + count as usize) };
+                        } else if count == 0 || error.raw_os_error() == Some(libc::EIO) {
+                            closed = true;
+                            break;
+                        } else if error.kind() == std::io::ErrorKind::Interrupted {
+                            continue;
+                        } else {
+                            if error.kind() != std::io::ErrorKind::WouldBlock {
+                                state.fail("PTY read failed");
+                                closed = true;
+                            }
+                            break;
                         }
-                        state.notify();
-                    } else if count == 0 || error.raw_os_error() == Some(libc::EIO) {
+                    }
+                    // A full queue blocks here: backpressure, so output is never dropped.
+                    if !chunk.is_empty() && output_tx.send(chunk).is_err() {
                         break;
-                    } else if !matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) {
-                        state.fail("PTY read failed");
+                    }
+                    if closed {
                         break;
                     }
                 } else if child_done.load(Ordering::Acquire) {
@@ -381,24 +431,10 @@ impl Session {
                         break;
                     }
                 }
-                if parser
-                    .sync_timeout()
-                    .sync_timeout()
-                    .is_some_and(|deadline| deadline <= Instant::now())
-                {
-                    {
-                        let mut terminal = term.lock();
-                        parser.stop_sync(&mut *terminal);
-                        state.revision.fetch_add(1, Ordering::Release);
-                    }
-                    state.notify();
-                }
             }
-            {
-                let mut terminal = term.lock();
-                parser.stop_sync(&mut *terminal);
-                state.revision.fetch_add(1, Ordering::Release);
-            }
+            // All output read so far is parsed before exit is reported.
+            drop(output_tx);
+            let _ = parser_thread.join();
             if !child_done.load(Ordering::Acquire) {
                 // Closing a session hangs up the foreground process group and shell.
                 // SAFETY: positive IDs originate from this PTY; never signal our own group.

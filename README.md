@@ -1,7 +1,9 @@
-# Vibeterm
+# vibeterm
 
-A native Linux terminal in Rust, with a real shell PTY and GPU text rendering.
-Graphite surfaces, readable text, a quiet teal accent, and no continuous idle animation.
+**A fast, native GPU terminal for Linux.** [vibeterm.sh](https://vibeterm.sh)
+
+Written in Rust with a real shell PTY and GPU text rendering: graphite surfaces,
+readable text, a quiet teal accent, and no continuous idle animation.
 
 **0.1.0 is an early preview.** Tabs, splits, scrollback search, a command palette and
 live configuration are implemented, and everyday use, nvim, tmux, copy/paste and

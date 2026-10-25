@@ -3,7 +3,9 @@ name = "vibeterm"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
-description = "A native, GPU-rendered Linux terminal"
+description = "A fast, native GPU terminal for Linux"
+homepage = "https://vibeterm.sh"
+repository = "https://github.com/lfreixial/vibeterm"
 license = "MIT"
 
 [dependencies]

@@ -1,38 +1,49 @@
-# Local source package; no AUR upload or installation is performed automatically.
-# From the repository root:
-#   tar --exclude=target --exclude=.git -czf /tmp/vibeterm-0.1.0.tar.gz .
-#   cp packaging/PKGBUILD /tmp/PKGBUILD
-#   cd /tmp && makepkg -sf
+# Builds the tagged GitHub release. To build an unreleased checkout instead:
+#   git archive --prefix=vibeterm-0.1.0/ -o packaging/vibeterm-0.1.0.tar.gz HEAD
+#   cd packaging && makepkg -f --skipchecksums
 pkgname=vibeterm
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='Native GPU terminal for Linux (early single-pane release)'
+pkgdesc='Native GPU-rendered terminal for Linux with tabs, splits and search (early preview)'
 arch=('x86_64' 'aarch64')
+url='https://github.com/lfreixial/vibeterm'
 license=('MIT')
-depends=('gcc-libs' 'glibc' 'fontconfig' 'libxkbcommon' 'wayland' 'libx11' 'libxcursor' 'libxi' 'libxrandr' 'vulkan-icd-loader')
-makedepends=('rust' 'pkgconf')
-optdepends=('vulkan-driver: hardware-accelerated rendering' 'mesa: OpenGL fallback' 'ttf-dejavu: monospace font')
-source=("$pkgname-$pkgver.tar.gz")
-sha256sums=('SKIP') # Local, unpublished source archive; pin a digest before distribution.
+# The binary links only the C runtime; these are loaded at run time.
+depends=('gcc-libs' 'glibc' 'wayland' 'libxkbcommon' 'libxkbcommon-x11' 'libx11' 'libxcursor' 'libxi' 'libxrandr' 'vulkan-icd-loader')
+makedepends=('cargo')
+optdepends=('vulkan-driver: hardware-accelerated rendering'
+            'mesa: OpenGL fallback when no Vulkan driver is available'
+            'ttf-nerd-fonts-symbols: icons used by many shell prompts')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP') # Replace with the release tarball digest once the tag exists.
 
 prepare() {
-  cargo fetch --locked
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
-  export CARGO_TARGET_DIR="$srcdir/target"
-  cargo build --release --locked --offline
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
 }
 
 check() {
-  cargo test --locked --offline
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  # PTY tests spawn real shells; GPU/window code is not exercised here.
+  cargo test --frozen
 }
 
 package() {
+  cd "$pkgname-$pkgver"
   install -Dm755 target/release/vibeterm "$pkgdir/usr/bin/vibeterm"
   install -Dm644 packaging/vibeterm.desktop "$pkgdir/usr/share/applications/vibeterm.desktop"
   install -Dm644 packaging/vibeterm.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/vibeterm.svg"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/vibeterm/LICENSE"
   install -Dm644 config.example.toml "$pkgdir/usr/share/doc/vibeterm/config.example.toml"
   install -Dm644 README.md "$pkgdir/usr/share/doc/vibeterm/README.md"
+  install -Dm644 CHANGELOG.md "$pkgdir/usr/share/doc/vibeterm/CHANGELOG.md"
 }

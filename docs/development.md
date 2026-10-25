@@ -41,3 +41,18 @@ CPU/RSS and release diagnostics. Do not equate those figures with physical laten
 
 The GitHub workflow is added but has not run remotely. Packaging is local only;
 no package installation or AUR publication was performed.
+
+## Releasing
+
+1. Set `version` in `Cargo.toml` and `pkgver` in `packaging/PKGBUILD`, run
+   `cargo build --locked` so `Cargo.lock` matches, and add a `CHANGELOG.md` section.
+2. Merge to `main`, then tag and push: `git tag v0.1.0 && git push origin v0.1.0`.
+3. `.github/workflows/release.yml` checks the tag matches `Cargo.toml`, runs the
+   tests, builds on Ubuntu 24.04 (so older glibc versions can run it) and publishes a
+   pre-release with the binary tarball, its SHA-256 and the changelog section as notes.
+4. Replace `sha256sums=('SKIP')` in the PKGBUILD with the digest of GitHub's source
+   tarball for the tag (`makepkg -g` prints it).
+
+To test the package before tagging, build a tarball laid out like GitHub's:
+`git archive --prefix=vibeterm-0.1.0/ -o packaging/vibeterm-0.1.0.tar.gz HEAD`, then
+`cd packaging && makepkg -f --skipchecksums`.

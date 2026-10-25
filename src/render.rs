@@ -43,7 +43,24 @@ const ANSI: [[u8; 3]; 16] = [
     [242, 245, 250],
 ];
 
-pub fn indexed(index: usize, config: &Config) -> [u8; 3] {
+/// Configured colors, parsed once per frame rather than once per cell.
+pub struct Palette {
+    pub foreground: [u8; 3],
+    pub background: [u8; 3],
+    pub accent: [u8; 3],
+}
+impl Palette {
+    pub fn new(config: &Config) -> Self {
+        let color = |value: &str| parse_color(value).unwrap_or([255, 0, 255]);
+        Self {
+            foreground: color(&config.foreground),
+            background: color(&config.background),
+            accent: color(&config.accent),
+        }
+    }
+}
+
+pub fn indexed(index: usize, palette: &Palette) -> [u8; 3] {
     match index {
         0..=15 => ANSI[index],
         16..=231 => {
@@ -52,14 +69,14 @@ pub fn indexed(index: usize, config: &Config) -> [u8; 3] {
             [level(n / 36), level(n / 6 % 6), level(n % 6)]
         }
         232..=255 => [8 + 10 * (index - 232) as u8; 3],
-        257 => parse_color(&config.background).unwrap(),
-        258 => parse_color(&config.accent).unwrap(),
+        257 => palette.background,
+        258 => palette.accent,
         259..=266 => ANSI[index - 259].map(|c| (f32::from(c) * 0.66) as u8),
-        _ => parse_color(&config.foreground).unwrap(),
+        _ => palette.foreground,
     }
 }
 
-fn resolve(color: AnsiColor, colors: &Colors, config: &Config) -> [u8; 3] {
+fn resolve(color: AnsiColor, colors: &Colors, palette: &Palette) -> [u8; 3] {
     let index = match color {
         AnsiColor::Spec(rgb) => return [rgb.r, rgb.g, rgb.b],
         AnsiColor::Named(named) => named as usize,
@@ -67,7 +84,7 @@ fn resolve(color: AnsiColor, colors: &Colors, config: &Config) -> [u8; 3] {
     };
     colors[index]
         .map(|rgb| [rgb.r, rgb.g, rgb.b])
-        .unwrap_or_else(|| indexed(index, config))
+        .unwrap_or_else(|| indexed(index, palette))
 }
 
 pub struct Cell {
@@ -87,12 +104,18 @@ pub struct Snapshot {
     pub rows: usize,
 }
 impl Snapshot {
-    pub fn capture(term: &Terminal, config: &Config, cursor_visible: bool) -> Self {
+    /// `focused` is window focus: an unfocused window shows a hollow block cursor.
+    pub fn capture(
+        term: &Terminal,
+        palette: &Palette,
+        cursor_visible: bool,
+        focused: bool,
+    ) -> Self {
         let content = term.renderable_content();
         let background = resolve(
             AnsiColor::Named(NamedColor::Background),
             content.colors,
-            config,
+            palette,
         );
         let cursor_row = content.cursor.point.line.0 + content.display_offset as i32;
         let cursor = (cursor_visible
@@ -102,7 +125,10 @@ impl Snapshot {
             .then_some((
                 content.cursor.point.column.0,
                 cursor_row.max(0) as usize,
-                content.cursor.shape,
+                match content.cursor.shape {
+                    CursorShape::Block if !focused => CursorShape::HollowBlock,
+                    shape => shape,
+                },
             ));
         let mut cells = Vec::with_capacity(term.columns() * term.screen_lines());
         for indexed in content.display_iter {
@@ -111,8 +137,8 @@ impl Snapshot {
                 continue;
             }
             let cell = indexed.cell;
-            let mut fg = resolve(cell.fg, content.colors, config);
-            let mut bg = resolve(cell.bg, content.colors, config);
+            let mut fg = resolve(cell.fg, content.colors, palette);
+            let mut bg = resolve(cell.bg, content.colors, palette);
             if cell.flags.contains(Flags::DIM) {
                 fg = fg.map(|c| (f32::from(c) * 0.66) as u8);
             }
@@ -128,7 +154,7 @@ impl Snapshot {
             if cursor.is_some_and(|(col, line, shape)| {
                 shape == CursorShape::Block && col == indexed.point.column.0 && line == row as usize
             }) {
-                bg = parse_color(&config.accent).unwrap();
+                bg = palette.accent;
                 fg = background;
             }
             let mut text = String::new();
@@ -671,6 +697,26 @@ impl Renderer {
                         },
                         color,
                     )),
+                    CursorShape::HollowBlock => {
+                        let t = self.scale.max(1.0);
+                        let (w, h) = (self.cell_width, self.cell_height);
+                        for (rx, ry, rw, rh) in [
+                            (x, y, w, t),
+                            (x, y + h - t, w, t),
+                            (x, y, t, h),
+                            (x + w - t, y, t, h),
+                        ] {
+                            solids.push((
+                                Rect {
+                                    x: rx,
+                                    y: ry,
+                                    width: rw,
+                                    height: rh,
+                                },
+                                color,
+                            ));
+                        }
+                    }
                     CursorShape::Underline => solids.push((
                         Rect {
                             x,
@@ -948,11 +994,12 @@ mod tests {
 
     #[test]
     fn xterm_cube_and_grayscale() {
-        let config = Config::default();
-        assert_eq!(indexed(16, &config), [0, 0, 0]);
-        assert_eq!(indexed(21, &config), [0, 0, 255]);
-        assert_eq!(indexed(231, &config), [255, 255, 255]);
-        assert_eq!(indexed(232, &config), [8, 8, 8]);
-        assert_eq!(indexed(255, &config), [238, 238, 238]);
+        let palette = Palette::new(&Config::default());
+        assert_eq!(indexed(16, &palette), [0, 0, 0]);
+        assert_eq!(indexed(21, &palette), [0, 0, 255]);
+        assert_eq!(indexed(231, &palette), [255, 255, 255]);
+        assert_eq!(indexed(232, &palette), [8, 8, 8]);
+        assert_eq!(indexed(255, &palette), [238, 238, 238]);
+        assert_eq!(indexed(257, &palette), [0x17, 0x1b, 0x24]);
     }
 }

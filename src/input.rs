@@ -1,5 +1,49 @@
 use alacritty_terminal::term::TermMode;
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
+
+/// With Control held, non-Latin layouts report e.g. Cyrillic letters; map the physical
+/// key back to its US letter so Ctrl+C, Ctrl+D and shortcuts keep working.
+pub fn latin(key: &Key, physical: PhysicalKey, mods: ModifiersState) -> Key {
+    let Key::Character(value) = key else {
+        return key.clone();
+    };
+    if !mods.control_key() || value.is_ascii() {
+        return key.clone();
+    }
+    let PhysicalKey::Code(code) = physical else {
+        return key.clone();
+    };
+    let letter = match code {
+        KeyCode::KeyA => 'a',
+        KeyCode::KeyB => 'b',
+        KeyCode::KeyC => 'c',
+        KeyCode::KeyD => 'd',
+        KeyCode::KeyE => 'e',
+        KeyCode::KeyF => 'f',
+        KeyCode::KeyG => 'g',
+        KeyCode::KeyH => 'h',
+        KeyCode::KeyI => 'i',
+        KeyCode::KeyJ => 'j',
+        KeyCode::KeyK => 'k',
+        KeyCode::KeyL => 'l',
+        KeyCode::KeyM => 'm',
+        KeyCode::KeyN => 'n',
+        KeyCode::KeyO => 'o',
+        KeyCode::KeyP => 'p',
+        KeyCode::KeyQ => 'q',
+        KeyCode::KeyR => 'r',
+        KeyCode::KeyS => 's',
+        KeyCode::KeyT => 't',
+        KeyCode::KeyU => 'u',
+        KeyCode::KeyV => 'v',
+        KeyCode::KeyW => 'w',
+        KeyCode::KeyX => 'x',
+        KeyCode::KeyY => 'y',
+        KeyCode::KeyZ => 'z',
+        _ => return key.clone(),
+    };
+    Key::Character(letter.to_string().into())
+}
 
 /// Encode legacy xterm input. Application shortcuts are handled before this boundary.
 pub fn encode(key: &Key, text: Option<&str>, mods: ModifiersState, mode: TermMode) -> Vec<u8> {
@@ -13,6 +57,8 @@ pub fn encode(key: &Key, text: Option<&str>, mods: ModifiersState, mode: TermMod
         Key::Named(NamedKey::Tab) => "\t".into(),
         Key::Named(NamedKey::Backspace) => if mods.control_key() { "\x08" } else { "\x7f" }.into(),
         Key::Named(NamedKey::Escape) => "\x1b".into(),
+        Key::Named(NamedKey::Space) if mods.control_key() => "\0".into(),
+        Key::Named(NamedKey::Space) => " ".into(),
         Key::Named(
             k @ (NamedKey::ArrowUp
             | NamedKey::ArrowDown
@@ -116,11 +162,14 @@ pub fn encode(key: &Key, text: Option<&str>, mods: ModifiersState, mode: TermMod
 }
 
 pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
-    // ESC is never allowed to terminate bracketed paste and inject control sequences.
-    let text = text
-        .replace('\x1b', "")
+    // Like xterm's default, drop C0/C1 controls other than tab and newlines. ESC can
+    // never terminate bracketed paste, and pasted ^C/^D cannot act as keystrokes.
+    let text: String = text
         .replace("\r\n", "\n")
-        .replace('\n', "\r");
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r'))
+        .map(|c| if c == '\n' { '\r' } else { c })
+        .collect();
     if bracketed {
         format!("\x1b[200~{text}\x1b[201~").into_bytes()
     } else {
@@ -189,6 +238,35 @@ mod tests {
             ),
             [3]
         );
+        let space = Key::Named(NamedKey::Space);
+        assert_eq!(
+            encode(
+                &space,
+                Some(" "),
+                ModifiersState::CONTROL,
+                TermMode::empty()
+            ),
+            [0]
+        );
+        assert_eq!(
+            encode(&space, Some(" "), ModifiersState::ALT, TermMode::empty()),
+            b"\x1b "
+        );
+    }
+    #[test]
+    fn control_keys_survive_non_latin_layouts() {
+        let cyrillic = Key::Character("с".into());
+        let physical = PhysicalKey::Code(KeyCode::KeyC);
+        let key = latin(&cyrillic, physical, ModifiersState::CONTROL);
+        assert_eq!(key, Key::Character("c".into()));
+        assert_eq!(
+            encode(&key, None, ModifiersState::CONTROL, TermMode::empty()),
+            [3]
+        );
+        assert_eq!(
+            latin(&cyrillic, physical, ModifiersState::empty()),
+            cyrillic
+        );
     }
     #[test]
     fn bracketed_paste_cannot_escape_its_envelope() {
@@ -196,6 +274,7 @@ mod tests {
             paste("one\r\ntwo\x1b[201~", true),
             b"\x1b[200~one\rtwo[201~\x1b[201~"
         );
+        assert_eq!(paste("a\x03b\x04\tc\u{9b}d\x7f", false), b"ab\tcd");
         assert_eq!(
             mouse(0, 2, 3, true, ModifiersState::empty(), TermMode::SGR_MOUSE),
             b"\x1b[<0;3;4m"

@@ -182,3 +182,16 @@ fn independent_sessions_route_input_and_close_without_affecting_each_other() {
     assert!(visible(&second).contains("SECOND:two"));
     assert!(!visible(&second).contains("FIRST"));
 }
+
+#[test]
+fn working_directory_follows_the_shell() {
+    let session = spawn("printf 'READY\\n'; read value; cd /usr; printf 'MOVED\\n'; read value");
+    wait_until(|| visible(&session).contains("READY"));
+    assert_eq!(session.cwd(), Some(std::env::current_dir().unwrap()));
+    session.input(b"go\r".to_vec()).unwrap();
+    wait_until(|| visible(&session).contains("MOVED"));
+    assert_eq!(session.cwd().as_deref(), Some(std::path::Path::new("/usr")));
+    session.input(b"done\r".to_vec()).unwrap();
+    wait_until(|| session.shared.exited.load(Ordering::Acquire));
+    assert_eq!(session.cwd(), None);
+}

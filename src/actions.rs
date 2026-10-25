@@ -119,12 +119,9 @@ pub fn validate(overrides: &BTreeMap<Action, String>) -> Result<()> {
         }
         seen.push(chord);
     }
-    for (action, alias) in [(Action::Paste, "Shift+Insert")] {
-        if !overrides.contains_key(&action) && seen.contains(&parse(alias)?) {
-            bail!(
-                "Shortcut conflicts with default alias: {alias}; override or disable {action:?} first"
-            );
-        }
+    let alias = "Shift+Insert";
+    if !overrides.contains_key(&Action::Paste) && seen.contains(&parse(alias)?) {
+        bail!("Shortcut conflicts with default alias: {alias}; override or disable Paste first");
     }
     Ok(())
 }

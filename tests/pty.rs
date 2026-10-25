@@ -237,3 +237,16 @@ fn snapshots_repaint_only_damaged_rows() {
     session.input(b"done\r".to_vec()).unwrap();
     wait_until(|| session.shared.exited.load(Ordering::Acquire));
 }
+
+#[test]
+fn programs_can_copy_but_not_read_the_clipboard() {
+    // "aGVsbG8=" is base64 for "hello"; the second sequence asks to read the clipboard.
+    let session =
+        spawn("printf '\\033]52;c;aGVsbG8=\\a\\033]52;p;?\\a'; printf 'READY\\n'; read value");
+    wait_until(|| visible(&session).contains("READY"));
+    let copied = session.shared.clipboard.lock().unwrap().clone();
+    assert_eq!(copied, [Some("hello".to_string()), None]);
+    session.input(b"\r".to_vec()).unwrap();
+    wait_until(|| session.shared.exited.load(Ordering::Acquire));
+    assert!(session.shared.error.lock().unwrap().is_none());
+}

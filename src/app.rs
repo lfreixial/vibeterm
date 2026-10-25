@@ -784,6 +784,12 @@ impl ApplicationHandler<Event> for App {
                 };
                 let error = pane.session.shared.error.lock().unwrap().take();
                 let exited = pane.session.shared.exited.load(Ordering::Acquire);
+                let copies = std::mem::take(&mut *pane.session.shared.clipboard.lock().unwrap());
+                for (slot, text) in copies.into_iter().enumerate() {
+                    if let Some(text) = text {
+                        state.clipboard(ClipboardCommand::Copy(text, slot == 1));
+                    }
+                }
                 if let Some(error) = error {
                     state.notice(error);
                 }

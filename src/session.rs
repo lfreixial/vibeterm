@@ -25,6 +25,8 @@ use std::{
 };
 
 pub const MAX_INPUT: usize = 256 * 1024;
+/// Largest OSC 52 copy accepted from a program.
+const MAX_CLIPBOARD: usize = 1024 * 1024;
 /// Largest PTY read batch handed to the parser thread.
 const OUTPUT_CHUNK: usize = 64 * 1024;
 /// Batches queued for parsing before the reactor stops reading (512 KiB in total).
@@ -69,6 +71,8 @@ pub struct Shared {
     pub exited: AtomicBool,
     pub title: Mutex<String>,
     pub error: Mutex<Option<String>>,
+    /// Latest OSC 52 copy request per clipboard: `[clipboard, primary selection]`.
+    pub clipboard: Mutex<[Option<String>; 2]>,
     stop: AtomicBool,
     wake: Wake,
 }
@@ -115,6 +119,15 @@ impl EventListener for Listener {
                     .collect()
             }
             Event::ResetTitle => *self.shared.title.lock().unwrap() = "vibeterm".into(),
+            // Programs such as tmux and nvim copy through OSC 52. Copying only: reads
+            // stay disabled so programs cannot snoop on the clipboard.
+            Event::ClipboardStore(kind, text) if text.len() <= MAX_CLIPBOARD => {
+                let slot = usize::from(matches!(kind, term::ClipboardType::Selection));
+                self.shared.clipboard.lock().unwrap()[slot] = Some(text);
+                // Bypass damage coalescing so a pane in a hidden tab can still copy.
+                (self.shared.wake)();
+            }
+            Event::ClipboardStore(..) => self.shared.fail("Clipboard copy over 1 MiB ignored"),
             _ => (),
         }
     }
@@ -141,7 +154,7 @@ pub fn engine_config(config: &Config) -> term::Config {
             blinking: config.cursor_blink,
         },
         kitty_keyboard: false,
-        osc52: term::Osc52::Disabled,
+        osc52: term::Osc52::OnlyCopy,
         ..Default::default()
     }
 }
@@ -219,6 +232,7 @@ impl Session {
             stop: AtomicBool::new(false),
             title: Mutex::new("vibeterm".into()),
             error: Mutex::new(None),
+            clipboard: Mutex::new([None, None]),
             wake,
         });
         let listener = Listener {

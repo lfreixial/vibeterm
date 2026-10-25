@@ -119,6 +119,8 @@ struct Pane {
     /// Points added to the window-wide font size for this pane only.
     zoom: f32,
     metrics: CellMetrics,
+    /// Last rendered cells, refreshed from engine damage each frame.
+    snapshot: Snapshot,
 }
 
 struct State {
@@ -709,6 +711,7 @@ impl App {
                     size,
                     zoom: 0.0,
                     metrics: renderer.metrics(),
+                    snapshot: Snapshot::default(),
                 },
             )]),
             workspace: Workspace::new(1),
@@ -819,6 +822,7 @@ impl ApplicationHandler<Event> for App {
                                 size,
                                 zoom: 0.0,
                                 metrics: state.renderer.metrics(),
+                                snapshot: Snapshot::default(),
                             },
                         );
                         if let Some(axis) = axis {
@@ -979,9 +983,13 @@ impl ApplicationHandler<Event> for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => state.modifiers = modifiers.state(),
             WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
-                state.preedit = text;
-                state.composing = cursor.is_some();
-                state.redraw();
+                // Compositors answer every IME cursor-area update with an empty preedit;
+                // redrawing for those doubled the frames drawn while typing.
+                if state.preedit != text || state.composing != cursor.is_some() {
+                    state.preedit = text;
+                    state.composing = cursor.is_some();
+                    state.redraw();
+                }
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 state.preedit.clear();
@@ -1003,9 +1011,11 @@ impl ApplicationHandler<Event> for App {
                 }
             }
             WindowEvent::Ime(Ime::Disabled) => {
-                state.preedit.clear();
-                state.composing = false;
-                state.redraw();
+                if !state.preedit.is_empty() || state.composing {
+                    state.preedit.clear();
+                    state.composing = false;
+                    state.redraw();
+                }
             }
             WindowEvent::KeyboardInput {
                 event,
@@ -1354,27 +1364,33 @@ impl ApplicationHandler<Event> for App {
             WindowEvent::RedrawRequested if !state.occluded => {
                 let active = state.workspace.active();
                 let palette = Palette::new(&self.config);
-                let frames: Vec<_> = state
-                    .placements()
-                    .into_iter()
-                    .map(|(id, rect)| {
-                        let pane = &state.panes[&id];
+                let placements = state.placements();
+                let damage: Vec<_> = placements
+                    .iter()
+                    .map(|(id, _)| {
+                        let pane = state.panes.get_mut(id).unwrap();
                         pane.session.shared.dirty.store(false, Ordering::Release);
+                        pane.snapshot.update(
+                            &mut pane.session.terminal.lock(),
+                            &palette,
+                            state.blink_on && *id == active,
+                            state.focused,
+                            if *id == active { &state.preedit } else { "" },
+                        )
+                    })
+                    .collect();
+                let frames: Vec<_> = placements
+                    .into_iter()
+                    .zip(damage)
+                    .map(|((id, rect), damage)| {
+                        let pane = &state.panes[&id];
                         PaneFrame {
+                            id,
                             rect,
                             metrics: pane.metrics,
-                            snapshot: Snapshot::capture(
-                                &pane.session.terminal.lock(),
-                                &palette,
-                                state.blink_on && id == active,
-                                state.focused,
-                            ),
+                            snapshot: &pane.snapshot,
+                            damage,
                             active: id == active,
-                            preedit: if id == active {
-                                state.preedit.clone()
-                            } else {
-                                String::new()
-                            },
                         }
                     })
                     .collect();
@@ -1407,7 +1423,9 @@ impl ApplicationHandler<Event> for App {
                             };
                             format!(
                                 "vibeterm / pane {} · {} × {}{font} · Ctrl Shift P commands",
-                                active, current.snapshot.columns, current.snapshot.rows
+                                active,
+                                current.snapshot.columns,
+                                current.snapshot.rows.len()
                             )
                         }
                     });

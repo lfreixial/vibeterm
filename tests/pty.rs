@@ -9,6 +9,7 @@ use std::{
 };
 use vibeterm::{
     config::Config,
+    render::{Damage, Palette, Snapshot},
     session::{Session, Size},
 };
 
@@ -194,4 +195,45 @@ fn working_directory_follows_the_shell() {
     session.input(b"done\r".to_vec()).unwrap();
     wait_until(|| session.shared.exited.load(Ordering::Acquire));
     assert_eq!(session.cwd(), None);
+}
+
+#[test]
+fn snapshots_repaint_only_damaged_rows() {
+    let session =
+        spawn("printf 'one\\ntwo\\n'; read value; printf 'X'; read value; seq 1 40; read value");
+    wait_until(|| visible(&session).contains("two"));
+    let palette = Palette::new(&Config::default());
+    let mut snapshot = Snapshot::default();
+    let update = |snapshot: &mut Snapshot| {
+        snapshot.update(&mut session.terminal.lock(), &palette, true, true, "")
+    };
+    assert_eq!(update(&mut snapshot), Damage::Full);
+    let text: String = snapshot.rows[0]
+        .iter()
+        .filter_map(|cell| cell.glyph.as_ref().map(|glyph| glyph.base))
+        .collect();
+    assert_eq!(text, "one");
+    // Idle: only the row holding the cursor, which the engine always reports.
+    assert_eq!(update(&mut snapshot), Damage::Rows(vec![2]));
+    // The echoed reply lands on row 2 and output moves on to row 3.
+    session.input(b"go\r".to_vec()).unwrap();
+    wait_until(|| visible(&session).contains('X'));
+    assert_eq!(update(&mut snapshot), Damage::Rows(vec![2, 3]));
+    // A cursor style change repaints the old and new cursor rows only.
+    let damage = snapshot.update(&mut session.terminal.lock(), &palette, true, false, "");
+    assert_eq!(damage, Damage::Rows(vec![3]));
+    // Output that scrolls the screen changes every row.
+    session.input(b"more\r".to_vec()).unwrap();
+    wait_until(|| visible(&session).contains("40"));
+    let damage = snapshot.update(&mut session.terminal.lock(), &palette, true, true, "");
+    assert_eq!(damage, Damage::Full);
+    // So does scrolling the view back into history.
+    session
+        .terminal
+        .lock()
+        .scroll_display(alacritty_terminal::grid::Scroll::Delta(1));
+    let damage = snapshot.update(&mut session.terminal.lock(), &palette, true, true, "");
+    assert_eq!(damage, Damage::Full);
+    session.input(b"done\r".to_vec()).unwrap();
+    wait_until(|| session.shared.exited.load(Ordering::Acquire));
 }

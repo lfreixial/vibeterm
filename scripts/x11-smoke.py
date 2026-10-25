@@ -36,6 +36,7 @@ x.XResizeWindow.argtypes = [C.c_void_p, window_type, C.c_uint, C.c_uint]
 x.XCloseDisplay.argtypes = [C.c_void_p]
 x.XRaiseWindow.argtypes = [C.c_void_p, window_type]
 x.XSetInputFocus.argtypes = [C.c_void_p, window_type, C.c_int, C.c_ulong]
+x.XGetInputFocus.argtypes = [C.c_void_p, C.POINTER(window_type), C.POINTER(C.c_int)]
 x.XInternAtom.argtypes = [C.c_void_p, C.c_char_p, C.c_int]
 x.XInternAtom.restype = C.c_ulong
 x.XQueryTree.argtypes = [C.c_void_p, window_type, C.POINTER(window_type), C.POINTER(window_type), C.POINTER(C.POINTER(window_type)), C.POINTER(C.c_uint)]
@@ -82,7 +83,19 @@ def own_window():
         if pid.strip().endswith("= " + str(process.pid)):
             return int(candidate, 16)
 
+def ensure_focus():
+    # Key events sent to an unfocused window are discarded by the X input-method filter,
+    # so focus taken by another application mid-run used to make checks fail at random.
+    focused, revert = window_type(), C.c_int()
+    x.XGetInputFocus(display, C.byref(focused), C.byref(revert))
+    if focused.value != window:
+        x.XRaiseWindow(display, window)
+        x.XSetInputFocus(display, window, 2, 0)  # RevertToParent, CurrentTime
+        x.XFlush(display)
+        time.sleep(0.2)
+
 def key(symbol, modifiers=0):
+    ensure_focus()
     code = x.XKeysymToKeycode(display, symbol)
     if x.XkbKeycodeToKeysym(display, code, 0, 1) == symbol:
         modifiers |= 1

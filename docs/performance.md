@@ -136,3 +136,21 @@ Kitty's remaining lead on plain text and redraws comes from its own SIMD-optimis
 parser; vibeterm now runs close to the Alacritty engine's own ceiling, so further gains
 there require engine changes. PSS varies with how many other processes share the same
 driver libraries, so compare it only within a single run.
+
+## Damage-based rendering — 2026-10-25
+
+Process CPU (user+sys, median of 5) for interactive workloads, minus the ≈70 ms that
+startup, exit and the Python driver cost in every build. "Typing" echoes one character
+every 16 ms (300 frames); "ticker" rewrites one status line under a screen of text.
+
+| Workload | Rendering CPU before | After |
+| --- | --- | --- |
+| Typing | 170 ms (595 frames) | **80 ms (301 frames)** |
+| One-line ticker | 160 ms | **80 ms** |
+
+Snapshots re-copy and the canvas repaints only damaged rows, so unchanged panes cost
+nothing. Typing previously drew two frames per keystroke: Wayland compositors answer
+every IME cursor-area update with an empty preedit, which triggered a redraw; no-op
+IME events are now ignored. Output floods damage every row, so they repaint fully and
+add one canvas copy: plain/unicode/redraw throughput measured 136/133/162 MiB/s,
+within ≈3% of the previous run.

@@ -27,7 +27,10 @@ probes its wake socket before spawning, returning a clear error if blocked.
 Compilation/non-PTY tests work without desktop access; GUI tests ran outside the sandbox.
 
 The X11 smoke script finds its PID-owned window and sends keyboard events directly
-to it. Build examples and pass `--workspace` for tabs/splits/search/palette/live
+to it. The X input-method filter discards key events for an unfocused window, so the
+script restores focus to its window before each key; focus taken by another app
+mid-run previously made random checks fail (likely the earlier "intermittent resize
+timeout"). Build examples and pass `--workspace` for tabs/splits/search/palette/live
 config checks; these also exercise the clipboard without pointer automation.
 Optional pointer tests check window ancestry before clicking and restore
 position afterward. KWin prevented pointer targeting here; manual acceptance remains.

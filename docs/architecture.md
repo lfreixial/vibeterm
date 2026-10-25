@@ -40,7 +40,10 @@ Shaped cell buffers have a 4,096-entry LRU; CPU raster cache resets above 8,192
 entries; the GPU atlas has library/device limits. Geometry caps at 500×200 cells,
 each pane has its own grid; history defaults to 10,000 lines and caps at 100,000. These are count bounds, not
 a universal RAM budget. Wide cells occupy two columns; combining marks shape with
-their base. Cross-cell ligatures/full bidi layout are not implemented.
+their base. Cross-cell ligatures/full bidi layout are not implemented. Powerline separators
+(U+E0B0–E0B3) and block elements (U+2580–259F) are drawn as geometry that fills the
+cell exactly, independent of font metrics and line spacing. Glyph colours use glyphon's
+Web colour mode on non-sRGB surfaces; Accurate mode double-darkened all text.
 
 `workspace.rs` holds the pure binary split tree, tab order and stable pane IDs.
 `app.rs` owns native events, focus, IME, selection, clipboard requests, and reload.
@@ -97,7 +100,8 @@ No browser renderer, bespoke parser, telemetry, plugin host, or AI scaffolding e
 
 The child gets `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=vibeterm`.
 System xterm terminfo is the legacy compatibility target, not a promise of all xterm
-extensions. Kitty keyboard and OSC 52 are explicitly disabled. Graphics protocols,
+extensions. Kitty keyboard is disabled. OSC 52 is copy-only (tmux/nvim copy reaches the system
+clipboard, at most 1 MiB, latest request per clipboard); programs cannot read it. Graphics protocols,
 OSC 7/133 metadata, hyperlink activation, and application keypad encoding are absent.
 Color/pixel-size query events are not serviced yet; engine capability reports need
 a broader audit before daily-driver claims. Titles are bounded and control-filtered.

@@ -13,8 +13,8 @@ use alacritty_terminal::{
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
+    Attrs, Buffer, Cache, Color, ColorMode, Family, FontSystem, Metrics, Resolution, Shaping,
+    Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
 };
 use lru::LruCache;
 use std::{
@@ -254,6 +254,54 @@ impl Snapshot {
             Damage::Rows(rows)
         }
     }
+}
+
+/// Characters drawn as geometry so they fill the cell exactly, whatever the font's
+/// metrics or line spacing: powerline separators and block elements. Font glyphs for
+/// these leave gaps between rows and mismatched heights next to coloured segments.
+#[derive(Debug, PartialEq)]
+enum Builtin {
+    /// Rectangles as `[left, top, right, bottom]` fractions of the cell.
+    Rects(Vec<[f32; 4]>),
+    /// Whole cell in the foreground mixed into the background by this much.
+    Shade(f32),
+    Triangle {
+        right: bool,
+    },
+    Chevron {
+        right: bool,
+    },
+}
+fn builtin(c: char) -> Option<Builtin> {
+    const UL: [f32; 4] = [0.0, 0.0, 0.5, 0.5];
+    const UR: [f32; 4] = [0.5, 0.0, 1.0, 0.5];
+    const LL: [f32; 4] = [0.0, 0.5, 0.5, 1.0];
+    const LR: [f32; 4] = [0.5, 0.5, 1.0, 1.0];
+    let eighths = |n: u32| n as f32 / 8.0;
+    Some(match c as u32 {
+        0x2580 => Builtin::Rects(vec![[0.0, 0.0, 1.0, 0.5]]),
+        n @ 0x2581..=0x2588 => Builtin::Rects(vec![[0.0, 1.0 - eighths(n - 0x2580), 1.0, 1.0]]),
+        n @ 0x2589..=0x258f => Builtin::Rects(vec![[0.0, 0.0, eighths(0x2590 - n), 1.0]]),
+        0x2590 => Builtin::Rects(vec![[0.5, 0.0, 1.0, 1.0]]),
+        n @ 0x2591..=0x2593 => Builtin::Shade((n - 0x2590) as f32 / 4.0),
+        0x2594 => Builtin::Rects(vec![[0.0, 0.0, 1.0, 0.125]]),
+        0x2595 => Builtin::Rects(vec![[0.875, 0.0, 1.0, 1.0]]),
+        0x2596 => Builtin::Rects(vec![LL]),
+        0x2597 => Builtin::Rects(vec![LR]),
+        0x2598 => Builtin::Rects(vec![UL]),
+        0x2599 => Builtin::Rects(vec![UL, LL, LR]),
+        0x259a => Builtin::Rects(vec![UL, LR]),
+        0x259b => Builtin::Rects(vec![UL, UR, LL]),
+        0x259c => Builtin::Rects(vec![UL, UR, LR]),
+        0x259d => Builtin::Rects(vec![UR]),
+        0x259e => Builtin::Rects(vec![UR, LL]),
+        0x259f => Builtin::Rects(vec![UR, LL, LR]),
+        0xe0b0 => Builtin::Triangle { right: true },
+        0xe0b1 => Builtin::Chevron { right: true },
+        0xe0b2 => Builtin::Triangle { right: false },
+        0xe0b3 => Builtin::Chevron { right: false },
+        _ => return None,
+    })
 }
 
 /// Font size (points, before display scaling) and the cell it produces.
@@ -540,7 +588,16 @@ impl Renderer {
         surface.configure(&device, &surface_config);
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
-        let mut atlas = TextAtlas::new(&device, &queue, &cache, surface_config.format);
+        // Glyph colours are sRGB values. Accurate mode linearises them for an sRGB target
+        // to re-encode; on our usual non-sRGB target that double-darkened all text
+        // (e.g. #97a6b9 rendered as #4f617c), so pass colours through unchanged there.
+        let color_mode = if surface_config.format.is_srgb() {
+            ColorMode::Accurate
+        } else {
+            ColorMode::Web
+        };
+        let mut atlas =
+            TextAtlas::with_color_mode(&device, &queue, &cache, surface_config.format, color_mode);
         let text = TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let pane_text =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
@@ -733,6 +790,90 @@ impl Renderer {
         )
     }
 
+    /// Push a builtin glyph's geometry; rectangles go through `solids`, triangles
+    /// (already in pixels, clamped to `clip`) through `shapes`.
+    fn builtin_shape(
+        &self,
+        shape: Builtin,
+        cell: Rect,
+        clip: Rect,
+        (fg, bg): ([u8; 3], [u8; 3]),
+        solids: &mut Vec<(Rect, [u8; 3])>,
+        shapes: &mut Vec<([[f32; 2]; 3], [u8; 3])>,
+    ) {
+        // Snap edges to pixels so adjacent cells meet without seams.
+        let x = |f: f32| (cell.x + f * cell.width).round();
+        let y = |f: f32| (cell.y + f * cell.height).round();
+        let clamp = |[px, py]: [f32; 2]| [px, py.clamp(clip.y, clip.y + clip.height)];
+        let mut triangle = |points: [[f32; 2]; 3]| shapes.push((points.map(clamp), fg));
+        match shape {
+            Builtin::Rects(rects) => {
+                for [left, top, right, bottom] in rects {
+                    let r = Rect {
+                        x: x(left),
+                        y: y(top),
+                        width: x(right) - x(left),
+                        height: y(bottom) - y(top),
+                    };
+                    solids.push((r, fg));
+                }
+            }
+            Builtin::Shade(amount) => {
+                let mix = std::array::from_fn(|i| {
+                    (f32::from(bg[i]) + (f32::from(fg[i]) - f32::from(bg[i])) * amount).round()
+                        as u8
+                });
+                solids.push((cell, mix));
+            }
+            Builtin::Triangle { right } => {
+                let (base, tip) = if right {
+                    (x(0.0), x(1.0))
+                } else {
+                    (x(1.0), x(0.0))
+                };
+                triangle([
+                    [base, y(0.0)],
+                    [tip, (y(0.0) + y(1.0)) / 2.0],
+                    [base, y(1.0)],
+                ]);
+            }
+            Builtin::Chevron { right } => {
+                let (base, tip) = if right {
+                    (x(0.0), x(1.0))
+                } else {
+                    (x(1.0), x(0.0))
+                };
+                let mid = [tip, (y(0.0) + y(1.0)) / 2.0];
+                let half = self.scale.max(1.0) / 2.0;
+                for (from, to) in [([base, y(0.0)], mid), (mid, [base, y(1.0)])] {
+                    // Each stroke is a quad offset by half the line width on either side.
+                    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+                    let length = (dx * dx + dy * dy).sqrt().max(f32::EPSILON);
+                    let (nx, ny) = (-dy / length * half, dx / length * half);
+                    let a = [from[0] + nx, from[1] + ny];
+                    let b = [from[0] - nx, from[1] - ny];
+                    let c = [to[0] - nx, to[1] - ny];
+                    let d = [to[0] + nx, to[1] + ny];
+                    triangle([a, b, c]);
+                    triangle([a, c, d]);
+                }
+            }
+        }
+    }
+
+    fn triangle(&self, vertices: &mut Vec<Vertex>, points: [[f32; 2]; 3], rgb: [u8; 3]) {
+        let color = [rgb[0], rgb[1], rgb[2]].map(|c| f32::from(c) / 255.0);
+        for [x, y] in points {
+            vertices.push(Vertex {
+                position: [
+                    2.0 * x / self.surface_config.width as f32 - 1.0,
+                    1.0 - 2.0 * y / self.surface_config.height as f32,
+                ],
+                color: [color[0], color[1], color[2], 1.0],
+            });
+        }
+    }
+
     fn rectangle(&self, vertices: &mut Vec<Vertex>, x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3]) {
         let to_ndc = |x, y| {
             [
@@ -907,6 +1048,7 @@ impl Renderer {
                 height: rect.height.min(footer_y - rect.y).max(0.0),
             };
             let mut solids = Vec::new();
+            let mut shapes = Vec::new();
             if full {
                 solids.push((rect, snapshot.background));
             }
@@ -968,6 +1110,26 @@ impl Renderer {
                     let Some(glyph) = &cell.glyph else {
                         continue;
                     };
+                    if glyph.marks.is_none()
+                        && let Some(shape) = builtin(glyph.base)
+                    {
+                        let cell_rect = Rect {
+                            x,
+                            y,
+                            width: cell_width,
+                            height: cell_height,
+                        };
+                        let colors = (cell.fg, cell.bg);
+                        self.builtin_shape(
+                            shape,
+                            cell_rect,
+                            clip,
+                            colors,
+                            &mut solids,
+                            &mut shapes,
+                        );
+                        continue;
+                    }
                     let buffer = self.glyph(glyph, cell.flags, config, metrics, width);
                     glyphs.push(PlacedText {
                         buffer,
@@ -1074,6 +1236,9 @@ impl Renderer {
             for (r, color) in solids {
                 let r = intersection(r, clip);
                 self.rectangle(&mut vertices, r.x, r.y, r.width, r.height, color);
+            }
+            for (points, color) in shapes {
+                self.triangle(&mut vertices, points, color);
             }
         }
         self.layout = layout;
@@ -1419,6 +1584,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn block_elements_cover_the_expected_cell_fractions() {
+        assert_eq!(
+            builtin('█'),
+            Some(Builtin::Rects(vec![[0.0, 0.0, 1.0, 1.0]]))
+        );
+        assert_eq!(
+            builtin('▄'),
+            Some(Builtin::Rects(vec![[0.0, 0.5, 1.0, 1.0]]))
+        );
+        assert_eq!(
+            builtin('▁'),
+            Some(Builtin::Rects(vec![[0.0, 0.875, 1.0, 1.0]]))
+        );
+        assert_eq!(
+            builtin('▌'),
+            Some(Builtin::Rects(vec![[0.0, 0.0, 0.5, 1.0]]))
+        );
+        assert_eq!(
+            builtin('▏'),
+            Some(Builtin::Rects(vec![[0.0, 0.0, 0.125, 1.0]]))
+        );
+        assert_eq!(builtin('▒'), Some(Builtin::Shade(0.5)));
+        assert_eq!(
+            builtin('▟'),
+            Some(Builtin::Rects(vec![
+                [0.5, 0.0, 1.0, 0.5],
+                [0.0, 0.5, 0.5, 1.0],
+                [0.5, 0.5, 1.0, 1.0]
+            ]))
+        );
+        assert_eq!(builtin('\u{e0b0}'), Some(Builtin::Triangle { right: true }));
+        assert_eq!(builtin('a'), None);
     }
 
     #[test]

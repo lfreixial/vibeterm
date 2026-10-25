@@ -50,8 +50,9 @@ no package installation or AUR publication was performed.
 3. `.github/workflows/release.yml` checks the tag matches `Cargo.toml`, runs the
    tests, builds on Ubuntu 24.04 (so older glibc versions can run it) and publishes a
    pre-release with the binary tarball, its SHA-256 and the changelog section as notes.
-4. Replace `sha256sums=('SKIP')` in the PKGBUILD with the digest of GitHub's source
-   tarball for the tag (`makepkg -g` prints it).
+4. Set `sha256sums` in the PKGBUILD to the digest of GitHub's source tarball for the
+   tag: `curl -sfL https://github.com/lfreixial/vibeterm/archive/refs/tags/v0.1.0.tar.gz | sha256sum`
+   (`-f` matters: without it an error page would be hashed). Confirm with `makepkg -f`.
 
 To test the package before tagging, build a tarball laid out like GitHub's:
 `git archive --prefix=vibeterm-0.1.0/ -o packaging/vibeterm-0.1.0.tar.gz HEAD`, then

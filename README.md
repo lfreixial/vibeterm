@@ -3,23 +3,42 @@
 A native Linux terminal in Rust, with a real shell PTY and GPU text rendering.
 Graphite surfaces, readable text, a quiet teal accent, and no continuous idle animation.
 
-**Early multi-pane release; daily-driver acceptance is still in progress.** Tabs,
-splits, history search, a command palette, and live configuration are implemented. Real Bash input, resize, Unicode/color rendering, and `less` were tested
-on the desktop. The owner has confirmed selection/copy and middle-click paste work.
-Broader clipboard/backend coverage, IME, and mixed-monitor scaling still need manual
-acceptance. Workspace features have also passed the X11 desktop checks.
+**0.1.0 is an early preview.** Tabs, splits, scrollback search, a command palette and
+live configuration are implemented, and everyday use, nvim, tmux, copy/paste and
+search have been checked by hand on KDE Wayland. IME composition, mixed-DPI monitors
+and some protocol features still need work; see [the changelog](CHANGELOG.md).
+Linux only for now.
 
 ![Actual application with tabs and nested splits](docs/workspace.png)
 
+## Install
+
+**Arch / CachyOS:** build the package from [packaging/PKGBUILD](packaging/PKGBUILD):
+
+```sh
+git clone https://github.com/lfreixial/vibeterm && cd vibeterm/packaging
+makepkg -si
+```
+
+**Other distributions:** download `vibeterm-<version>-x86_64-linux.tar.gz` from
+[Releases](https://github.com/lfreixial/vibeterm/releases), check it against the
+`.sha256` file, extract it and run `./vibeterm`. Copy it to `~/.local/bin` to keep it;
+`vibeterm.desktop` and `vibeterm.svg` add a launcher entry. You need Wayland or X11,
+`libxkbcommon`, and a Vulkan driver (OpenGL is used as a fallback).
+
 ## Run
 
-This checkout already has a release executable:
+```sh
+vibeterm
+vibeterm -d ~/src
+vibeterm -e /bin/bash --noprofile --norc
+vibeterm --hold -e /usr/bin/printf '%s\n' 'arguments stay separate'
+```
+
+From a source checkout, use `./target/release/vibeterm` after building:
 
 ```sh
 ./target/release/vibeterm
-./target/release/vibeterm -d ~/src
-./target/release/vibeterm -e /bin/bash --noprofile --norc
-./target/release/vibeterm --hold -e /usr/bin/printf '%s\n' 'arguments stay separate'
 ```
 
 `-e` must be the final application option. Arguments are passed directly to the

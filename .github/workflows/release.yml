@@ -1,0 +1,36 @@
+name: Release
+# Pushing a version tag (e.g. v0.1.0) builds, tests and publishes a GitHub pre-release.
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - name: Check that the tag matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "Tag $GITHUB_REF_NAME does not match $version"; exit 1; }
+      - run: cargo test --workspace --locked
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          name="vibeterm-${GITHUB_REF_NAME#v}-x86_64-linux"
+          mkdir -p "dist/$name"
+          cp target/release/vibeterm LICENSE README.md CHANGELOG.md config.example.toml \
+            packaging/vibeterm.desktop packaging/vibeterm.svg "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Notes are the changelog's first version section.
+          awk '/^## /{n++} n==1' CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 \
+            --title "vibeterm $GITHUB_REF_NAME" --notes-file notes.md --prerelease --verify-tag

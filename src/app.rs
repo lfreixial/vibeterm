@@ -7,6 +7,7 @@ use alacritty_terminal::{
 };
 use anyhow::{Context, Result};
 use arboard::{Clipboard, GetExtLinux, LinuxClipboardKind, SetExtLinux};
+use glyphon::FontSystem;
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -21,7 +22,10 @@ use vibeterm::{
     actions::{self, ACTIONS, Action},
     config::Config,
     input,
-    render::{CellMetrics, Overlay, Palette, PaneFrame, Renderer, Snapshot, TabLabel},
+    render::{
+        CellMetrics, Overlay, Palette, PaneFrame, Renderer, Snapshot, TabLabel, measure_cell,
+        window_cells,
+    },
     search::{self, SearchWorker},
     session::Session,
     watch::ConfigWatcher,
@@ -606,6 +610,8 @@ struct App {
     state: Option<State>,
     failure: Option<anyhow::Error>,
     started: Instant,
+    /// System font discovery, started before the event loop so it overlaps window setup.
+    fonts: Option<std::thread::JoinHandle<FontSystem>>,
 }
 impl App {
     fn initialize(&mut self, event_loop: &ActiveEventLoop) -> Result<State> {
@@ -622,7 +628,44 @@ impl App {
                 .context("Open native window")?,
         );
         window.set_ime_allowed(true);
-        let renderer = pollster::block_on(Renderer::new(window, &self.config))?;
+        // Measure the font and start the shell while the GPU initialises on this thread.
+        let fonts = self.fonts.take().context("Fonts already consumed")?;
+        let (scale, inner) = (window.scale_factor() as f32, window.inner_size());
+        let config = self.config.clone();
+        let command = self.args.command.clone();
+        let directory = self.args.directory.clone();
+        let proxy = self.proxy.clone();
+        let early = std::thread::spawn(move || {
+            let mut fonts = fonts
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            let metrics = measure_cell(&mut fonts, &config, scale, config.font_size);
+            let size = window_cells(inner.width, inner.height, scale, &config, metrics);
+            let session = Session::spawn(
+                &config,
+                size,
+                &command,
+                directory.as_deref(),
+                Arc::new(move || {
+                    let _ = proxy.send_event(Event::Wake(1));
+                }),
+            );
+            (fonts, session.map(|session| (session, size)))
+        });
+        let mut spawned = None;
+        let renderer = pollster::block_on(Renderer::new(window, &self.config, || {
+            let (fonts, session) = early
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            spawned = Some(session);
+            fonts
+        }));
+        let (session, size) = match spawned {
+            Some(result) => result?,
+            // GPU setup failed before joining; the early thread finishes on its own.
+            None => return Err(renderer.err().unwrap()),
+        };
+        let renderer = renderer?;
         if self.args.diagnostics {
             eprintln!("GPU: {}", renderer.adapter_info);
             eprintln!(
@@ -643,16 +686,6 @@ impl App {
                 );
             }
         }
-        let proxy = self.proxy.clone();
-        let session = Session::spawn(
-            &self.config,
-            renderer.size(),
-            &self.args.command,
-            self.args.directory.as_deref(),
-            Arc::new(move || {
-                let _ = proxy.send_event(Event::Wake(1));
-            }),
-        )?;
         let search_proxy = self.proxy.clone();
         let search_worker = SearchWorker::new(move |result| {
             let _ = search_proxy.send_event(Event::Search(result));
@@ -673,7 +706,7 @@ impl App {
                 1,
                 Pane {
                     session,
-                    size: renderer.size(),
+                    size,
                     zoom: 0.0,
                     metrics: renderer.metrics(),
                 },
@@ -1506,6 +1539,7 @@ impl ApplicationHandler<Event> for App {
 
 pub fn run(args: Args, config: Config, config_path: PathBuf) -> Result<()> {
     let started = Instant::now();
+    let fonts = std::thread::spawn(FontSystem::new);
     let event_loop = EventLoop::<Event>::with_user_event()
         .build()
         .context("Connect to Wayland/X11 desktop")?;
@@ -1518,6 +1552,7 @@ pub fn run(args: Args, config: Config, config_path: PathBuf) -> Result<()> {
         state: None,
         failure: None,
         started,
+        fonts: Some(fonts),
     };
     event_loop.run_app(&mut app)?;
     if app.args.diagnostics

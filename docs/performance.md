@@ -100,3 +100,39 @@ The release X11 workspace scenario presented 1,043 frames, p50 5.869 ms / p95
 and does not demonstrate 240 Hz interaction. Raw data is in
 [workspace-release-check.txt](workspace-release-check.txt).
 Multi-pane sustained-load and physical input-latency measurements remain pending.
+
+## Comparison with other terminals — 2026-10-25
+
+`python3 scripts/compare.py target/release/vibeterm 5` runs identical workloads in each
+installed terminal with default settings, a 110×32 grid (Konsole honoured 110×28),
+native Wayland, same machine as above. Throughput is how fast the terminal consumes a
+pre-built burst written to its PTY (`tcdrain` waits until it has read everything);
+it is not frame rate or input latency. Startup is launch until a command runs inside
+it. Medians of 5 runs (10 for startup); run-to-run spread was ≤3%.
+
+| Measurement | vibeterm (before → after) | Alacritty 0.17 | Kitty 0.49 | Konsole 26.08 |
+| --- | --- | --- | --- | --- |
+| Plain text, 2M lines | 108 → **138 MiB/s** | 109 | **161** | 35 |
+| Coloured Unicode, 500k lines | 107 → **134 MiB/s** | 109 | 100 | 43 |
+| Full-screen redraws, 10k frames | 123 → **167 MiB/s** | 131 | **204** | 46 |
+| Startup until a command runs | 69.5 → **31.2 ms** | 56.9 | 133.8 | 96.5 |
+| Idle RSS | 84.3 → **65.6 MiB** | 94.8 | 124.6 | 100.1 |
+| Idle CPU | 0% | 0% | 0% | 0% |
+
+What changed, each verified by measurement before it was kept:
+
+- Vulkan-only GPU instance, OpenGL only as fallback: −20 ms startup, −17 MiB RSS.
+- Font database loaded on a thread from process start; shell spawned while the GPU
+  initialises: first frame ≈70 → ≈32 ms; shell running at 31 ms.
+- PTY reads pipelined with parsing on separate threads: +25–34% throughput.
+  Parser-only (`examples/replay`) ceiling is ≈141 MiB/s plain / ≈152 mixed.
+- Status/tab text shaping cached: draw CPU per frame p50 0.83 → 0.36 ms.
+- Allocation-free cell snapshots that skip blank cells: 212 → 163 µs per snapshot
+  (taken under the terminal lock, so this also shortens parser stalls).
+- Swapchain frame latency 2 → 1 (not measurable here without photon hardware).
+
+Tried and rejected: fat LTO and `panic = "abort"` (no measurable parser gain).
+Kitty's remaining lead on plain text and redraws comes from its own SIMD-optimised C
+parser; vibeterm now runs close to the Alacritty engine's own ceiling, so further gains
+there require engine changes. PSS varies with how many other processes share the same
+driver libraries, so compare it only within a single run.

@@ -61,7 +61,16 @@ focused/visible. Redundant resize/title/IME-position updates are suppressed. The
 first desktop run exposed a configure/redraw feedback loop; this was fixed before
 the baseline. Lost surfaces reconfigure, temporary errors retry after 100 ms, and
 zero-size windows skip rendering. Fatal GPU errors return diagnostics and tear down
-the session. Rendering currently redraws the full visible grid on damage.
+the session. Rendering is damage-based: each pane keeps its previous snapshot and
+re-copies only rows the engine reports as damaged (plus old/new cursor rows when the
+cursor, its blink/focus style or IME preedit change). Selection, colour, palette,
+geometry or scroll changes repaint the pane. Panes are painted into a persistent
+offscreen canvas, only damaged rows being repainted as full-width strips (every glyph,
+underline and cursor is clipped to its row); each frame copies the canvas to the
+swapchain image and draws tabs, palette and footer on top. Layout, font, overlay or
+surface changes, and any frame that fails before painting, repaint everything. The
+renderer is the only reader of engine damage. Wayland compositors answer each IME
+cursor-area update with an empty preedit; such no-op IME events no longer redraw.
 
 ## Dependencies and rationale
 

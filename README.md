@@ -23,8 +23,9 @@ makepkg -si
 **Other distributions:** download `vibeterm-<version>-x86_64-linux.tar.gz` from
 [Releases](https://github.com/lfreixial/vibeterm/releases), check it against the
 `.sha256` file, extract it and run `./vibeterm`. Copy it to `~/.local/bin` to keep it;
-`vibeterm.desktop` and `vibeterm.svg` add a launcher entry. You need Wayland or X11,
-`libxkbcommon`, and a Vulkan driver (OpenGL is used as a fallback).
+`vibeterm.desktop` and `vibeterm.svg` add a launcher entry. You need glibc 2.39 or newer
+(Ubuntu 24.04, Debian 13, Fedora 40 or later), Wayland or X11, `libxkbcommon`, and a
+Vulkan driver (OpenGL is used as a fallback).
 
 ## Run
 

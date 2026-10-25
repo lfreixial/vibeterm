@@ -38,6 +38,36 @@ def run(work, config, key, type_text, wait_for, capture, binary, env):
     type_text('PANE=three\n')
     check_pane('three.txt', 'three')
     capture('splits.png')
+
+    def grid(name):
+        type_text(f'stty size > {name}\n')
+        path = work / name
+        wait_for(lambda: path.exists() and len(path.read_text().split()) == 2,
+                 f"{name}: no stty output")
+        return tuple(map(int, path.read_text().split()))
+
+    # Pane order is one, three, two; three is focused.
+    three = grid('three-size.txt')
+    key(0xff53, 5)
+    two = grid('two-size.txt')
+    key(0xff51, 5)
+    for _ in range(4):
+        key(ord('='), 5)  # Ctrl+Shift+= zooms the focused pane only
+    time.sleep(0.3)
+    zoomed = grid('three-zoomed.txt')
+    if not (zoomed[1] < three[1] and zoomed[0] <= three[0]):
+        raise SystemExit(f"Pane zoom did not shrink the grid: {three} -> {zoomed}")
+    capture('pane-zoom.png')
+    key(0xff53, 5)
+    if grid('two-after-zoom.txt') != two:
+        raise SystemExit("Pane zoom changed a neighbouring pane")
+    key(0xff51, 5)
+    key(ord('0'), 5)  # Ctrl+Shift+0 restores the window font
+    time.sleep(0.3)
+    if grid('three-reset.txt') != three:
+        raise SystemExit("Pane zoom reset did not restore the grid")
+    print('PASS: per-pane zoom resizes only the focused pane and resets', flush=True)
+
     spawn(ord('T'), 3)
     type_text('PANE=four\n')
     check_pane('four.txt', 'four')

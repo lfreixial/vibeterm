@@ -59,6 +59,11 @@ pastes drop C0/C1 controls other than tab and newlines. Unit/PTY tests and the X
 workspace suite pass; pointer-driven divider dragging and autoscroll still need
 manual acceptance because KWin blocks the pointer test driver.
 
+Per-pane zoom: Ctrl+Shift+= / − / 0 change only the focused pane's font, as an
+offset from the window font (Ctrl+= / − / 0). Shortcuts also match the unshifted
+key, so `Ctrl+Shift+=` is written literally. The X11 workspace suite checks with
+`stty size` that only the focused pane's grid changes and that reset restores it.
+
 Remaining: M1 backend/input acceptance above, opacity, accessibility, broader
 multi-pane performance/stress checks, and package installation validation.
 OSC 7 directory reporting (for remote/SSH shells, where `/proc` cannot see) belongs to M3.

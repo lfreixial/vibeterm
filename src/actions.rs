@@ -22,8 +22,11 @@ pub enum Action {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    PaneZoomIn,
+    PaneZoomOut,
+    PaneZoomReset,
 }
-pub const ACTIONS: [(Action, &str, &str); 16] = [
+pub const ACTIONS: [(Action, &str, &str); 19] = [
     (Action::NewTab, "New tab", "Ctrl+Shift+t"),
     (Action::SplitColumns, "Split side by side", "Ctrl+Shift+e"),
     (Action::SplitRows, "Split above and below", "Ctrl+Shift+o"),
@@ -44,6 +47,21 @@ pub const ACTIONS: [(Action, &str, &str); 16] = [
     (Action::ZoomIn, "Increase font size", "Ctrl+="),
     (Action::ZoomOut, "Decrease font size", "Ctrl+-"),
     (Action::ZoomReset, "Reset font size", "Ctrl+0"),
+    (
+        Action::PaneZoomIn,
+        "Increase pane font size",
+        "Ctrl+Shift+=",
+    ),
+    (
+        Action::PaneZoomOut,
+        "Decrease pane font size",
+        "Ctrl+Shift+-",
+    ),
+    (
+        Action::PaneZoomReset,
+        "Reset pane font size",
+        "Ctrl+Shift+0",
+    ),
 ];
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Chord {
@@ -125,23 +143,22 @@ pub fn validate(overrides: &BTreeMap<Action, String>) -> Result<()> {
     }
     Ok(())
 }
+fn name(key: &Key) -> Option<String> {
+    match key {
+        Key::Character(s) => Some(s.to_ascii_lowercase()),
+        Key::Named(k) => Some(format!("{k:?}").to_ascii_lowercase()),
+        _ => None,
+    }
+}
+/// `unshifted` is the key without modifiers, so "Ctrl+Shift+=" matches although
+/// Shift turns `=` into `+` on the logical key.
 pub fn resolve(
     key: &Key,
+    unshifted: &Key,
     modifiers: ModifiersState,
     overrides: &BTreeMap<Action, String>,
 ) -> Option<Action> {
-    let name = match key {
-        Key::Character(s) => s.to_ascii_lowercase(),
-        Key::Named(k) => format!("{k:?}").to_ascii_lowercase(),
-        _ => return None,
-    };
-    // Preserve the familiar shifted plus key as a zoom alias when defaults are in use.
-    if name == "+"
-        && modifiers == ModifiersState::CONTROL | ModifiersState::SHIFT
-        && !overrides.contains_key(&Action::ZoomIn)
-    {
-        return Some(Action::ZoomIn);
-    }
+    let names = [name(key)?, name(unshifted).unwrap_or_default()];
     if *key == Key::Named(NamedKey::Insert)
         && modifiers == ModifiersState::SHIFT
         && !overrides.contains_key(&Action::Paste)
@@ -150,7 +167,7 @@ pub fn resolve(
     }
     ACTIONS.iter().find_map(|(action, _, _)| {
         let chord = parse(label(*action, overrides)).ok()?;
-        (chord.key == name && chord.modifiers == modifiers).then_some(*action)
+        (names.contains(&chord.key) && chord.modifiers == modifiers).then_some(*action)
     })
 }
 #[cfg(test)]
@@ -163,16 +180,41 @@ mod tests {
         validate(&map).unwrap();
         let key = Key::Character("t".into());
         assert_eq!(
-            resolve(&key, ModifiersState::ALT, &map),
+            resolve(&key, &key, ModifiersState::ALT, &map),
             Some(Action::NewTab)
         );
         assert_eq!(
-            resolve(&key, ModifiersState::CONTROL | ModifiersState::SHIFT, &map),
+            resolve(
+                &key,
+                &key,
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+                &map
+            ),
             None
         );
         map.insert(Action::Paste, "Alt+t".into());
         assert!(validate(&map).is_err());
         map.insert(Action::Paste, String::new());
         validate(&map).unwrap();
+    }
+    #[test]
+    fn shift_selects_pane_zoom_over_window_zoom() {
+        let none = BTreeMap::new();
+        let ctrl = ModifiersState::CONTROL;
+        let equals = Key::Character("=".into());
+        let plus = Key::Character("+".into());
+        assert_eq!(resolve(&equals, &equals, ctrl, &none), Some(Action::ZoomIn));
+        // Shift turns `=` into `+`; the unshifted key still identifies the chord.
+        assert_eq!(
+            resolve(&plus, &equals, ctrl | ModifiersState::SHIFT, &none),
+            Some(Action::PaneZoomIn)
+        );
+        let paren = Key::Character(")".into());
+        let zero = Key::Character("0".into());
+        assert_eq!(
+            resolve(&paren, &zero, ctrl | ModifiersState::SHIFT, &none),
+            Some(Action::PaneZoomReset)
+        );
+        assert_eq!(resolve(&zero, &zero, ctrl, &none), Some(Action::ZoomReset));
     }
 }

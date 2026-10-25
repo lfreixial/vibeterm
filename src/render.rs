@@ -16,7 +16,7 @@ use glyphon::{
 };
 use lru::LruCache;
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     num::NonZeroUsize,
     sync::Arc,
     time::{Duration, Instant},
@@ -187,9 +187,18 @@ impl Snapshot {
     }
 }
 
+/// Font size (points, before display scaling) and the cell it produces.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CellMetrics {
+    pub font_size: f32,
+    pub cell_width: f32,
+    pub cell_height: f32,
+}
+
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 struct GlyphKey {
     text: String,
+    size: u32,
     bold: bool,
     italic: bool,
     wide: bool,
@@ -260,6 +269,7 @@ fn bounds(rect: Rect) -> TextBounds {
 
 pub struct PaneFrame {
     pub rect: Rect,
+    pub metrics: CellMetrics,
     pub snapshot: Snapshot,
     pub active: bool,
     pub preedit: String,
@@ -293,6 +303,9 @@ pub struct Renderer {
     text: TextRenderer,
     solid: wgpu::RenderPipeline,
     glyphs: LruCache<GlyphKey, Arc<Buffer>>,
+    measured: HashMap<u32, CellMetrics>,
+    /// Cell size at the window-wide font size.
+    font_size: f32,
     pub cell_width: f32,
     pub cell_height: f32,
     pub padding: f32,
@@ -394,6 +407,8 @@ impl Renderer {
             text,
             solid,
             glyphs: LruCache::new(NonZeroUsize::new(4096).unwrap()),
+            measured: HashMap::new(),
+            font_size: config.font_size,
             cell_width: 9.0,
             cell_height: 20.0,
             padding: 14.0,
@@ -410,19 +425,50 @@ impl Renderer {
 
     pub fn configure_font(&mut self, config: &Config) {
         self.scale = self.window.scale_factor() as f32;
-        self.cell_height = (config.font_size * config.line_spacing * self.scale).ceil();
         self.padding = (config.padding * self.scale).round();
         self.footer_height = (28.0 * self.scale).round();
         self.glyphs.clear();
+        self.measured.clear();
         self.swash = SwashCache::new();
-        let buffer = self.buffer("M", config, false, false, None);
-        self.cell_width = buffer
-            .layout_runs()
-            .next()
-            .map(|run| run.line_w)
-            .unwrap_or(config.font_size * self.scale * 0.6)
-            .round()
-            .max(1.0);
+        let metrics = self.measure(config, config.font_size);
+        self.font_size = config.font_size;
+        self.cell_width = metrics.cell_width;
+        self.cell_height = metrics.cell_height;
+    }
+
+    /// Cell metrics for a font size, cached until the next `configure_font`.
+    pub fn measure(&mut self, config: &Config, font_size: f32) -> CellMetrics {
+        if let Some(metrics) = self.measured.get(&font_size.to_bits()) {
+            return *metrics;
+        }
+        let cell_height = (font_size * config.line_spacing * self.scale).ceil();
+        let probe = CellMetrics {
+            font_size,
+            cell_width: 0.0,
+            cell_height,
+        };
+        let buffer = self.buffer("M", config, probe, false, false, None);
+        let metrics = CellMetrics {
+            cell_width: buffer
+                .layout_runs()
+                .next()
+                .map(|run| run.line_w)
+                .unwrap_or(font_size * self.scale * 0.6)
+                .round()
+                .max(1.0),
+            ..probe
+        };
+        self.measured.insert(font_size.to_bits(), metrics);
+        metrics
+    }
+
+    /// Metrics at the window-wide font size.
+    pub fn metrics(&self) -> CellMetrics {
+        CellMetrics {
+            font_size: self.font_size,
+            cell_width: self.cell_width,
+            cell_height: self.cell_height,
+        }
     }
 
     pub fn header_height(&self, tabs: usize) -> f32 {
@@ -443,16 +489,16 @@ impl Renderer {
         }
     }
     pub fn size(&self) -> Size {
-        self.pane_size(self.content_rect(1))
+        self.pane_size(self.content_rect(1), self.metrics())
     }
-    pub fn pane_size(&self, rect: Rect) -> Size {
+    pub fn pane_size(&self, rect: Rect, metrics: CellMetrics) -> Size {
         Size {
-            columns: (((rect.width - 2.0 * self.padding).max(0.0) / self.cell_width) as usize)
+            columns: (((rect.width - 2.0 * self.padding).max(0.0) / metrics.cell_width) as usize)
                 .clamp(2, 500),
-            rows: (((rect.height - 2.0 * self.padding).max(0.0) / self.cell_height) as usize)
+            rows: (((rect.height - 2.0 * self.padding).max(0.0) / metrics.cell_height) as usize)
                 .clamp(1, 200),
-            cell_width: self.cell_width as u16,
-            cell_height: self.cell_height as u16,
+            cell_width: metrics.cell_width as u16,
+            cell_height: metrics.cell_height as u16,
         }
     }
 
@@ -474,6 +520,7 @@ impl Renderer {
         &mut self,
         text: &str,
         config: &Config,
+        metrics: CellMetrics,
         bold: bool,
         italic: bool,
         width: Option<f32>,
@@ -490,7 +537,7 @@ impl Renderer {
                 .family(family)
                 .weight(if bold { Weight::BOLD } else { Weight::NORMAL })
                 .style(if italic { Style::Italic } else { Style::Normal }),
-            Metrics::new(config.font_size * self.scale, self.cell_height),
+            Metrics::new(metrics.font_size * self.scale, metrics.cell_height),
             width,
         )
     }
@@ -576,6 +623,8 @@ impl Renderer {
         for pane in panes.iter().filter(|_| overlay.is_none()) {
             let snapshot = &pane.snapshot;
             let rect = pane.rect;
+            let metrics = pane.metrics;
+            let (cell_width, cell_height) = (metrics.cell_width, metrics.cell_height);
             self.rectangle(
                 &mut vertices,
                 rect.x,
@@ -609,9 +658,9 @@ impl Renderer {
             };
             let mut solids = Vec::new();
             for cell in &snapshot.cells {
-                let x = origin_x + cell.column as f32 * self.cell_width;
-                let y = origin_y + cell.row as f32 * self.cell_height;
-                let width = self.cell_width
+                let x = origin_x + cell.column as f32 * cell_width;
+                let y = origin_y + cell.row as f32 * cell_height;
+                let width = cell_width
                     * if cell.flags.contains(Flags::WIDE_CHAR) {
                         2.0
                     } else {
@@ -622,8 +671,8 @@ impl Renderer {
                         Rect {
                             x,
                             y,
-                            width: self.cell_width,
-                            height: self.cell_height,
+                            width: cell_width,
+                            height: cell_height,
                         },
                         cell.bg,
                     ));
@@ -632,7 +681,7 @@ impl Renderer {
                     solids.push((
                         Rect {
                             x,
-                            y: y + self.cell_height - 2.0 * self.scale,
+                            y: y + cell_height - 2.0 * self.scale,
                             width,
                             height: self.scale,
                         },
@@ -643,7 +692,7 @@ impl Renderer {
                     solids.push((
                         Rect {
                             x,
-                            y: y + self.cell_height * 0.55,
+                            y: y + cell_height * 0.55,
                             width,
                             height: self.scale,
                         },
@@ -658,12 +707,19 @@ impl Renderer {
                     bold: cell.flags.contains(Flags::BOLD),
                     italic: cell.flags.contains(Flags::ITALIC),
                     wide: cell.flags.contains(Flags::WIDE_CHAR),
+                    size: metrics.font_size.to_bits(),
                 };
                 let buffer = if let Some(buffer) = self.glyphs.get(&key) {
                     buffer.clone()
                 } else {
-                    let buffer =
-                        Arc::new(self.buffer(&key.text, config, key.bold, key.italic, Some(width)));
+                    let buffer = Arc::new(self.buffer(
+                        &key.text,
+                        config,
+                        metrics,
+                        key.bold,
+                        key.italic,
+                        Some(width),
+                    ));
                     self.glyphs.put(key, buffer.clone());
                     buffer
                 };
@@ -677,15 +733,15 @@ impl Renderer {
                             x,
                             y,
                             width,
-                            height: self.cell_height,
+                            height: cell_height,
                         },
                     )),
                     color: cell.fg,
                 });
             }
             if let Some((col, row, shape)) = snapshot.cursor {
-                let x = origin_x + col as f32 * self.cell_width;
-                let y = origin_y + row as f32 * self.cell_height;
+                let x = origin_x + col as f32 * cell_width;
+                let y = origin_y + row as f32 * cell_height;
                 let color = parse_color(&config.accent)?;
                 match shape {
                     CursorShape::Beam => solids.push((
@@ -693,13 +749,13 @@ impl Renderer {
                             x,
                             y,
                             width: 2.0 * self.scale,
-                            height: self.cell_height,
+                            height: cell_height,
                         },
                         color,
                     )),
                     CursorShape::HollowBlock => {
                         let t = self.scale.max(1.0);
-                        let (w, h) = (self.cell_width, self.cell_height);
+                        let (w, h) = (cell_width, cell_height);
                         for (rx, ry, rw, rh) in [
                             (x, y, w, t),
                             (x, y + h - t, w, t),
@@ -720,8 +776,8 @@ impl Renderer {
                     CursorShape::Underline => solids.push((
                         Rect {
                             x,
-                            y: y + self.cell_height - 2.0 * self.scale,
-                            width: self.cell_width,
+                            y: y + cell_height - 2.0 * self.scale,
+                            width: cell_width,
                             height: 2.0 * self.scale,
                         },
                         color,
@@ -734,8 +790,8 @@ impl Renderer {
                         Rect {
                             x,
                             y,
-                            width: width.min(pane.preedit.chars().count() as f32 * self.cell_width),
-                            height: self.cell_height,
+                            width: width.min(pane.preedit.chars().count() as f32 * cell_width),
+                            height: cell_height,
                         },
                         [44, 57, 69],
                     ));
@@ -743,6 +799,7 @@ impl Renderer {
                         buffer: Arc::new(self.buffer(
                             &pane.preedit,
                             config,
+                            metrics,
                             false,
                             false,
                             Some(width),
@@ -755,7 +812,7 @@ impl Renderer {
                                 x,
                                 y,
                                 width,
-                                height: self.cell_height,
+                                height: cell_height,
                             },
                         )),
                         color,

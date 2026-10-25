@@ -99,15 +99,20 @@ limited to 64 KiB; existing shells keep running when the configured shell change
 | Select while a TUI captures mouse | Hold Shift |
 | Scroll history | Wheel or Shift+PageUp / PageDown |
 | Oldest history / return to prompt | Shift+Home / End |
-| Increase / decrease font | Ctrl++ / Ctrl+− |
-| Reset font to configured size | Ctrl+0 |
+| Increase / decrease font (whole window) | Ctrl+= / Ctrl+− |
+| Reset font to configured size (also clears pane zoom) | Ctrl+0 |
+| Increase / decrease font (focused pane only) | Ctrl+Shift+= / Ctrl+Shift+− |
+| Reset focused pane to the window font | Ctrl+Shift+0 |
 | Reload configuration | Ctrl+Shift+R |
 | Clear footer notice (also sends Escape) | Escape |
 
 Click a pane or tab to focus it. Limits are eight tabs and 32 total panes; splits
 need enough room for useful cells. Drag the gap between panes to resize a split.
 Dragging a selection past a pane's top or bottom edge scrolls history. Zoom survives
-configuration reloads as an offset from the configured `font_size`.
+configuration reloads as an offset from the configured `font_size`. Pane zoom is an
+offset from the window font, so window zoom keeps each pane's relative size. Panes
+inside tmux share one grid and cannot be zoomed separately; use vibeterm splits.
+Ctrl+Shift+− replaces the shell's Ctrl+_ undo; Ctrl+/ still sends it.
 Search is literal and case-insensitive unless the query includes uppercase letters.
 Enter finds the next match, Shift+Enter the previous match, and Escape closes search.
 Output changes during a scan cancel its result; Enter retries. Queries are limited

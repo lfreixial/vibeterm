@@ -34,3 +34,7 @@ accent = "#80cbc4"
 # zoom_in = "Ctrl+="
 # zoom_out = "Ctrl+-"
 # zoom_reset = "Ctrl+0"
+# Focused pane only; Shift+= is matched as "=" so no "+" key name is needed.
+# pane_zoom_in = "Ctrl+Shift+="
+# pane_zoom_out = "Ctrl+Shift+-"
+# pane_zoom_reset = "Ctrl+Shift+0"

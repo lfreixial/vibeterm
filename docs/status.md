@@ -31,7 +31,7 @@ test driver's pointer targeting, so those interactions were not marked passed.
 
 ## M2 — workspace features implemented; acceptance remains partial
 
-Tabs and nested equal splits run independent shells, with keyboard/mouse focus,
+Tabs and nested resizable splits run independent shells, with keyboard/mouse focus,
 per-tab focus restoration, pane closure and hidden-child exit handling. Limits:
 eight tabs, 32 panes, minimum dimensions for creating a split. Session startup and
 pane teardown run off the UI thread. Tabs are not saved across application restarts.
@@ -50,9 +50,23 @@ custom shortcuts, and hidden-pane exit. Screenshots were visually inspected.
 The earlier intermittent resize timeout did not recur in the follow-up full run;
 its original cause is not established.
 
-Remaining: M1 backend/input acceptance above, draggable dividers, selection
-autoscroll, opacity, accessibility, broader multi-pane performance/stress checks,
-and package installation validation. Shell-directory tracking belongs to M3.
+Follow-up (2026-10-25): split dividers can be dragged (ratios persist when panes
+close), selection autoscrolls past pane edges, and new panes open in the focused
+shell's `/proc` working directory. Ctrl+Space sends NUL, Control shortcuts use the
+physical key on non-Latin layouts, unfocused windows show a hollow cursor, the wheel
+honours the alternate-scroll mode, zoom reset returns to the configured size, and
+pastes drop C0/C1 controls other than tab and newlines. Unit/PTY tests and the X11
+workspace suite pass; pointer-driven divider dragging and autoscroll still need
+manual acceptance because KWin blocks the pointer test driver.
+
+Per-pane zoom: Ctrl+Shift+= / − / 0 change only the focused pane's font, as an
+offset from the window font (Ctrl+= / − / 0). Shortcuts also match the unshifted
+key, so `Ctrl+Shift+=` is written literally. The X11 workspace suite checks with
+`stty size` that only the focused pane's grid changes and that reset restores it.
+
+Remaining: M1 backend/input acceptance above, opacity, accessibility, broader
+multi-pane performance/stress checks, and package installation validation.
+OSC 7 directory reporting (for remote/SSH shells, where `/proc` cannot see) belongs to M3.
 
 ## M3 / M4 — not started
 

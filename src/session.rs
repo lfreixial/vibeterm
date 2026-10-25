@@ -118,6 +118,7 @@ pub struct Session {
     pub shared: Arc<Shared>,
     tx: SyncSender<Command>,
     signal: Arc<UnixStream>,
+    pid: i32,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -339,6 +340,7 @@ impl Session {
                 if fds[0].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
                     // SAFETY: the master outlives this read, and bytes is writable for its full length.
                     let count = unsafe { libc::read(fd, bytes.as_mut_ptr().cast(), bytes.len()) };
+                    let error = std::io::Error::last_os_error();
                     if count > 0 {
                         {
                             let mut terminal = term.lock();
@@ -346,13 +348,12 @@ impl Session {
                             state.revision.fetch_add(1, Ordering::Release);
                         }
                         state.notify();
-                    } else if count == 0
-                        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EIO)
-                    {
+                    } else if count == 0 || error.raw_os_error() == Some(libc::EIO) {
                         break;
-                    } else if std::io::Error::last_os_error().kind()
-                        != std::io::ErrorKind::WouldBlock
-                    {
+                    } else if !matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) {
                         state.fail("PTY read failed");
                         break;
                     }
@@ -437,6 +438,7 @@ impl Session {
             shared,
             tx,
             signal: signal_tx,
+            pid,
             worker: Some(worker),
         })
     }
@@ -453,6 +455,17 @@ impl Session {
         })?;
         signal(&self.signal);
         Ok(())
+    }
+
+    /// The child's current directory, read from procfs. The reactor keeps the child
+    /// unreaped until `exited` is set, so the PID cannot belong to another process here.
+    pub fn cwd(&self) -> Option<std::path::PathBuf> {
+        if self.shared.exited.load(Ordering::Acquire) {
+            return None;
+        }
+        std::fs::read_link(format!("/proc/{}/cwd", self.pid))
+            .ok()
+            .filter(|dir| dir.is_dir())
     }
 
     pub fn configure(&self, config: &Config) {

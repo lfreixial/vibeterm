@@ -21,11 +21,11 @@ use vibeterm::{
     actions::{self, ACTIONS, Action},
     config::Config,
     input,
-    render::{Overlay, PaneFrame, Renderer, Snapshot, TabLabel},
+    render::{CellMetrics, Overlay, Palette, PaneFrame, Renderer, Snapshot, TabLabel},
     search::{self, SearchWorker},
     session::Session,
     watch::ConfigWatcher,
-    workspace::{Axis, MAX_PANES, MAX_TABS, PaneId, Rect, Workspace},
+    workspace::{Axis, Divider, MAX_PANES, MAX_TABS, PaneId, Rect, Workspace},
 };
 use winit::{
     application::ApplicationHandler,
@@ -33,7 +33,8 @@ use winit::{
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
-    window::{Window, WindowId},
+    platform::modifier_supplement::KeyEventExtModifierSupplement,
+    window::{CursorIcon, Window, WindowId},
 };
 
 enum Event {
@@ -111,6 +112,9 @@ struct SearchUi {
 struct Pane {
     session: Session,
     size: vibeterm::session::Size,
+    /// Points added to the window-wide font size for this pane only.
+    zoom: f32,
+    metrics: CellMetrics,
 }
 
 struct State {
@@ -132,6 +136,12 @@ struct State {
     pressed: Option<MouseButton>,
     last_click: Option<(Instant, (usize, usize), u8)>,
     selecting: bool,
+    /// Next selection autoscroll step while dragging beyond the pane edge.
+    autoscroll: Option<Instant>,
+    drag: Option<Divider>,
+    cursor_icon: CursorIcon,
+    /// Font size from the configuration file; zoom changes `Config::font_size` only.
+    configured_font_size: f32,
     preedit: String,
     composing: bool,
     focused: bool,
@@ -149,11 +159,74 @@ impl State {
     fn session(&self) -> &Session {
         &self.panes[&self.workspace.active()].session
     }
+    fn metrics(&self) -> CellMetrics {
+        self.panes[&self.workspace.active()].metrics
+    }
+    /// Recompute every pane's cell size after a font, scale or pane-zoom change.
+    fn remeasure(&mut self, config: &Config) {
+        for pane in self.panes.values_mut() {
+            let size = (config.font_size + pane.zoom).clamp(6.0, 72.0);
+            pane.metrics = self.renderer.measure(config, size);
+        }
+        self.resize();
+    }
     fn placements(&self) -> Vec<(PaneId, Rect)> {
         self.workspace.placements(
             self.renderer.content_rect(self.workspace.tabs.len()),
-            6.0 * self.renderer.scale,
+            self.gap(),
         )
+    }
+    fn gap(&self) -> f32 {
+        6.0 * self.renderer.scale
+    }
+    fn divider(&self) -> Option<Divider> {
+        self.workspace.divider_at(
+            self.renderer.content_rect(self.workspace.tabs.len()),
+            self.gap(),
+            self.mouse.x as f32,
+            self.mouse.y as f32,
+            3.0 * self.renderer.scale,
+        )
+    }
+    fn set_cursor_icon(&mut self, icon: CursorIcon) {
+        if self.cursor_icon != icon {
+            self.cursor_icon = icon;
+            self.renderer.window.set_cursor(icon);
+        }
+    }
+    /// Pixels to scroll the selection by while the pointer is above (positive) or
+    /// below (negative) the active pane's text area.
+    fn overscroll(&self) -> f32 {
+        let rect = self.active_rect();
+        let y = self.mouse.y as f32;
+        let top = rect.y + self.renderer.padding;
+        let bottom = rect.y + rect.height - self.renderer.padding;
+        if y < top {
+            top - y
+        } else if y > bottom {
+            bottom - y
+        } else {
+            0.0
+        }
+    }
+    fn autoscroll_step(&mut self) {
+        let distance = self.overscroll();
+        if !self.selecting || distance == 0.0 {
+            self.autoscroll = None;
+            return;
+        }
+        // Speed up with distance from the edge, at most ten lines per step.
+        let lines = (1.0 + distance.abs() / self.metrics().cell_height).min(10.0) as i32;
+        self.session()
+            .terminal
+            .lock()
+            .scroll_display(Scroll::Delta(lines * distance.signum() as i32));
+        let (point, side) = self.point();
+        if let Some(selection) = self.session().terminal.lock().selection.as_mut() {
+            selection.update(point, side);
+        }
+        self.autoscroll = Some(Instant::now() + Duration::from_millis(50));
+        self.redraw();
     }
     fn active_rect(&self) -> Rect {
         self.placements()
@@ -198,10 +271,11 @@ impl State {
     fn cell(&self) -> (usize, usize) {
         let term = self.session().terminal.lock();
         let rect = self.active_rect();
+        let metrics = self.metrics();
         let col = ((self.mouse.x as f32 - rect.x - self.renderer.padding).max(0.0)
-            / self.renderer.cell_width) as usize;
+            / metrics.cell_width) as usize;
         let row = ((self.mouse.y as f32 - rect.y - self.renderer.padding).max(0.0)
-            / self.renderer.cell_height) as usize;
+            / metrics.cell_height) as usize;
         (
             col.min(term.columns() - 1),
             row.min(term.screen_lines() - 1),
@@ -211,7 +285,7 @@ impl State {
         let (col, row) = self.cell();
         let offset = self.session().terminal.lock().grid().display_offset();
         let fraction = ((self.mouse.x as f32 - self.active_rect().x - self.renderer.padding)
-            / self.renderer.cell_width)
+            / self.metrics().cell_width)
             .fract();
         (
             Point::new(Line(row as i32 - offset as i32), Column(col)),
@@ -248,8 +322,8 @@ impl State {
         self.ime_position = None;
         self.renderer.resize();
         for (id, rect) in self.placements() {
-            let size = self.renderer.pane_size(rect);
             let pane = self.panes.get_mut(&id).unwrap();
+            let size = self.renderer.pane_size(rect, pane.metrics);
             if pane.size != size {
                 if let Err(error) = pane.session.resize(size) {
                     self.notice = Some(error.to_string());
@@ -275,6 +349,8 @@ impl State {
             term.is_focused = focused;
         }
         self.selecting = false;
+        self.autoscroll = None;
+        self.drag = None;
         self.pressed = None;
         self.composing = false;
         self.preedit.clear();
@@ -305,15 +381,16 @@ impl State {
             Action::SplitColumns | Action::SplitRows => {
                 !self.spawning && self.panes.len() < MAX_PANES && {
                     let r = self.active_rect();
+                    let metrics = self.metrics();
                     if action == Action::SplitColumns {
                         r.width
                             >= 4.0 * self.renderer.padding
-                                + 8.0 * self.renderer.cell_width
+                                + 8.0 * metrics.cell_width
                                 + 6.0 * self.renderer.scale
                     } else {
                         r.height
                             >= 4.0 * self.renderer.padding
-                                + 4.0 * self.renderer.cell_height
+                                + 4.0 * metrics.cell_height
                                 + 6.0 * self.renderer.scale
                     }
                 }
@@ -361,9 +438,16 @@ impl State {
                     _ => None,
                 };
                 let config = config.clone();
-                let cwd = self.directory.clone();
+                // Follow the focused shell's directory; fall back to the launch directory.
+                let cwd = self
+                    .session()
+                    .cwd()
+                    .unwrap_or_else(|| self.directory.clone());
                 let proxy = self.proxy.clone();
-                let size = self.renderer.pane_size(self.active_rect());
+                // New panes start at the window-wide font size.
+                let size = self
+                    .renderer
+                    .pane_size(self.active_rect(), self.renderer.metrics());
                 std::thread::spawn(move || {
                     let wake = proxy.clone();
                     let result = Session::spawn(
@@ -412,10 +496,26 @@ impl State {
                 config.font_size = match action {
                     Action::ZoomIn => (config.font_size + 1.0).min(72.0),
                     Action::ZoomOut => (config.font_size - 1.0).max(6.0),
-                    _ => Config::default().font_size,
+                    _ => {
+                        // Resetting the window also clears every pane's own zoom.
+                        for pane in self.panes.values_mut() {
+                            pane.zoom = 0.0;
+                        }
+                        self.configured_font_size
+                    }
                 };
                 self.renderer.configure_font(config);
-                self.resize();
+                self.remeasure(config);
+            }
+            Action::PaneZoomIn | Action::PaneZoomOut | Action::PaneZoomReset => {
+                let pane = self.panes.get_mut(&self.workspace.active()).unwrap();
+                let current = (config.font_size + pane.zoom).clamp(6.0, 72.0);
+                pane.zoom = match action {
+                    Action::PaneZoomIn => (current + 1.0).min(72.0) - config.font_size,
+                    Action::PaneZoomOut => (current - 1.0).max(6.0) - config.font_size,
+                    _ => 0.0,
+                };
+                self.remeasure(config);
             }
             Action::Palette => {
                 self.search = None;
@@ -574,6 +674,8 @@ impl App {
                 Pane {
                     session,
                     size: renderer.size(),
+                    zoom: 0.0,
+                    metrics: renderer.metrics(),
                 },
             )]),
             workspace: Workspace::new(1),
@@ -594,6 +696,10 @@ impl App {
             pressed: None,
             last_click: None,
             selecting: false,
+            autoscroll: None,
+            drag: None,
+            cursor_icon: CursorIcon::Default,
+            configured_font_size: self.config.font_size,
             preedit: String::new(),
             composing: false,
             focused: true,
@@ -647,6 +753,8 @@ impl ApplicationHandler<Event> for App {
                 }
                 if exited && !self.args.hold {
                     state.close_pane(id);
+                } else if exited && state.notice.is_none() {
+                    state.notice("Process exited · Ctrl Shift W closes the pane");
                 }
                 if state.workspace.tabs.is_empty() {
                     event_loop.exit();
@@ -671,7 +779,15 @@ impl ApplicationHandler<Event> for App {
                     Ok(session) if state.panes.contains_key(&origin) => {
                         let previous = state.workspace.active();
                         state.workspace.focus(origin);
-                        state.panes.insert(id, Pane { session, size });
+                        state.panes.insert(
+                            id,
+                            Pane {
+                                session,
+                                size,
+                                zoom: 0.0,
+                                metrics: state.renderer.metrics(),
+                            },
+                        );
                         if let Some(axis) = axis {
                             state.workspace.split(id, axis);
                         } else {
@@ -757,14 +873,17 @@ impl ApplicationHandler<Event> for App {
             Event::Config(result) => {
                 state.reload_pending = false;
                 match result {
-                    Ok(config) => {
+                    Ok(mut config) => {
+                        let zoom = self.config.font_size - state.configured_font_size;
+                        state.configured_font_size = config.font_size;
+                        config.font_size = (config.font_size + zoom).clamp(6.0, 72.0);
                         state.blink_on = true;
                         for pane in state.panes.values() {
                             pane.session.configure(&config);
                         }
                         state.renderer.configure_font(&config);
+                        state.remeasure(&config);
                         self.config = config;
-                        state.resize();
                         state.notice("Configuration reloaded");
                     }
                     Err(error) => state.notice(format!(
@@ -798,7 +917,7 @@ impl ApplicationHandler<Event> for App {
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 state.renderer.configure_font(&self.config);
-                state.resize();
+                state.remeasure(&self.config);
             }
             WindowEvent::Occluded(occluded) => {
                 state.occluded = occluded;
@@ -819,6 +938,8 @@ impl ApplicationHandler<Event> for App {
                 if !focused {
                     state.pressed = None;
                     state.selecting = false;
+                    state.autoscroll = None;
+                    state.drag = None;
                 }
                 state.blink_on = true;
                 state.redraw();
@@ -862,7 +983,7 @@ impl ApplicationHandler<Event> for App {
                     return;
                 }
                 let mods = state.modifiers;
-                let key = &event.logical_key;
+                let key = &input::latin(&event.logical_key, event.physical_key, mods);
                 if state.search.is_some() {
                     if *key == Key::Named(NamedKey::Escape) {
                         state.search = None;
@@ -931,7 +1052,12 @@ impl ApplicationHandler<Event> for App {
                     }
                     return;
                 }
-                if let Some(action) = actions::resolve(key, mods, &self.config.keybindings) {
+                if let Some(action) = actions::resolve(
+                    key,
+                    &input::latin(&event.key_without_modifiers(), event.physical_key, mods),
+                    mods,
+                    &self.config.keybindings,
+                ) {
                     state.action(action, &mut self.config);
                     if state.workspace.tabs.is_empty() {
                         event_loop.exit();
@@ -977,11 +1103,35 @@ impl ApplicationHandler<Event> for App {
                 if state.palette.is_some() {
                     return;
                 }
+                if let Some(divider) = state.drag.clone() {
+                    let min = 2.0 * state.renderer.padding + 2.0 * state.renderer.cell_width;
+                    let min = match divider.axis {
+                        Axis::Columns => min,
+                        Axis::Rows => 2.0 * state.renderer.padding + state.renderer.cell_height,
+                    };
+                    let gap = state.gap();
+                    state
+                        .workspace
+                        .drag(&divider, gap, position.x as f32, position.y as f32, min);
+                    state.resize();
+                    return;
+                }
+                if state.pressed.is_none() {
+                    let icon = match state.divider().map(|d| d.axis) {
+                        Some(Axis::Columns) => CursorIcon::ColResize,
+                        Some(Axis::Rows) => CursorIcon::RowResize,
+                        None => CursorIcon::Default,
+                    };
+                    state.set_cursor_icon(icon);
+                }
                 let current = state.cell();
                 if state.selecting {
                     let (point, side) = state.point();
                     if let Some(selection) = state.session().terminal.lock().selection.as_mut() {
                         selection.update(point, side);
+                    }
+                    if state.overscroll() != 0.0 && state.autoscroll.is_none() {
+                        state.autoscroll = Some(Instant::now());
                     }
                     state.redraw();
                 } else if current != previous
@@ -1015,6 +1165,17 @@ impl ApplicationHandler<Event> for App {
             } => {
                 let pressed = button_state == ElementState::Pressed;
                 if state.palette.is_some() {
+                    return;
+                }
+                if button == MouseButton::Left && !pressed && state.drag.take().is_some() {
+                    state.redraw();
+                    return;
+                }
+                if pressed
+                    && button == MouseButton::Left
+                    && let Some(divider) = state.divider()
+                {
+                    state.drag = Some(divider);
                     return;
                 }
                 if pressed && button == MouseButton::Left {
@@ -1066,6 +1227,9 @@ impl ApplicationHandler<Event> for App {
                     ));
                 } else if button == MouseButton::Left {
                     state.selecting = pressed;
+                    if !pressed {
+                        state.autoscroll = None;
+                    }
                     if pressed {
                         let cell = state.cell();
                         let now = Instant::now();
@@ -1114,10 +1278,9 @@ impl ApplicationHandler<Event> for App {
                     MouseScrollDelta::LineDelta(_, y) => (y * 3.0) as i32,
                     MouseScrollDelta::PixelDelta(delta) => {
                         state.wheel_pixels += delta.y;
-                        let lines =
-                            (state.wheel_pixels / f64::from(state.renderer.cell_height)) as i32;
-                        state.wheel_pixels -=
-                            f64::from(lines) * f64::from(state.renderer.cell_height);
+                        let height = f64::from(state.metrics().cell_height);
+                        let lines = (state.wheel_pixels / height) as i32;
+                        state.wheel_pixels -= f64::from(lines) * height;
                         lines
                     }
                 }
@@ -1134,7 +1297,9 @@ impl ApplicationHandler<Event> for App {
                             state.mode(),
                         ));
                     }
-                } else if state.mode().contains(TermMode::ALT_SCREEN)
+                } else if state
+                    .mode()
+                    .contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
                     && !state.modifiers.shift_key()
                 {
                     for _ in 0..lines.abs() {
@@ -1155,6 +1320,7 @@ impl ApplicationHandler<Event> for App {
             }
             WindowEvent::RedrawRequested if !state.occluded => {
                 let active = state.workspace.active();
+                let palette = Palette::new(&self.config);
                 let frames: Vec<_> = state
                     .placements()
                     .into_iter()
@@ -1163,10 +1329,12 @@ impl ApplicationHandler<Event> for App {
                         pane.session.shared.dirty.store(false, Ordering::Release);
                         PaneFrame {
                             rect,
+                            metrics: pane.metrics,
                             snapshot: Snapshot::capture(
                                 &pane.session.terminal.lock(),
-                                &self.config,
+                                &palette,
                                 state.blink_on && id == active,
+                                state.focused,
                             ),
                             active: id == active,
                             preedit: if id == active {
@@ -1198,8 +1366,14 @@ impl ApplicationHandler<Event> for App {
                                 current.snapshot.offset
                             )
                         } else {
+                            // Mention the pane's font only when it differs from the window's.
+                            let font = if current.metrics.font_size == self.config.font_size {
+                                String::new()
+                            } else {
+                                format!(" · {}pt", current.metrics.font_size)
+                            };
                             format!(
-                                "vibeterm / pane {} · {} × {} · Ctrl Shift P commands",
+                                "vibeterm / pane {} · {} × {}{font} · Ctrl Shift P commands",
                                 active, current.snapshot.columns, current.snapshot.rows
                             )
                         }
@@ -1212,12 +1386,12 @@ impl ApplicationHandler<Event> for App {
                         PhysicalPosition::new(
                             current.rect.x
                                 + state.renderer.padding
-                                + col as f32 * state.renderer.cell_width,
+                                + col as f32 * current.metrics.cell_width,
                             current.rect.y
                                 + state.renderer.padding
-                                + (row + 1) as f32 * state.renderer.cell_height,
+                                + (row + 1) as f32 * current.metrics.cell_height,
                         ),
-                        PhysicalSize::new(state.renderer.cell_width, state.renderer.cell_height),
+                        PhysicalSize::new(current.metrics.cell_width, current.metrics.cell_height),
                     );
                 }
                 let tabs: Vec<_> = state
@@ -1310,10 +1484,17 @@ impl ApplicationHandler<Event> for App {
             state.retry = None;
             state.redraw();
         }
+        if state
+            .autoscroll
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            state.autoscroll_step();
+        }
         let deadline = state
             .retry
             .into_iter()
             .chain(blink.then_some(state.next_blink))
+            .chain(state.autoscroll)
             .min();
         event_loop.set_control_flow(
             deadline

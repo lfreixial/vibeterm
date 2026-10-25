@@ -44,10 +44,11 @@ Rust 1.90.0. Engine tests, real PTYs, and desktop interaction are distinguished 
 2. Run `python3 scripts/visual-fixture.py`. Check combining accents, CJK, emoji,
    box drawing, styling, selection across wide cells, and copied wrapped lines.
 3. Run `seq 1 1000`; scroll, drag a selection, copy into another app and paste back,
-   and test middle-click primary. Hold Shift in a mouse-aware TUI. Drag-autoscroll
-   is not implemented yet.
+   and test middle-click primary. Hold Shift in a mouse-aware TUI. Drag a selection
+   above and below the pane to check autoscroll; drag split dividers in both directions.
 4. Paste multiline text in Bash/Zsh/Fish and inspect it before Enter. Test real
-   keyboard modifier combinations and key repeat.
+   keyboard modifier combinations and key repeat, including Ctrl+Space and
+   Ctrl+C/Ctrl+Shift+T under a non-Latin (e.g. Russian) layout.
 5. Load a temporary config, make its font size/color invalid, and save it.
    The old settings/session should survive with an error. Correct it and save again.
    Also test explicit Ctrl+Shift+R reload.

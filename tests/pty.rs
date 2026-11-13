@@ -294,7 +294,13 @@ fn integrated_shell(shell: &str, rc: &str) -> (Session, tempfile::TempDir, tempf
         )
         .unwrap();
     } else {
-        std::fs::write(home.path().join(".zshenv"), "export VT_ENV_LOADED=yes\n").unwrap();
+        // Ubuntu's global zshrc runs compinit, which can prompt about runner-owned
+        // completion directories. These tests isolate our hooks from that host setup.
+        std::fs::write(
+            home.path().join(".zshenv"),
+            "skip_global_compinit=1\nexport VT_ENV_LOADED=yes\n",
+        )
+        .unwrap();
         std::fs::write(home.path().join(".zshrc"), format!("PS1='READY> '\n{rc}\n")).unwrap();
     }
     let files = vibeterm::shell::prepare(&mut cmd, std::ffi::OsStr::new(shell))
@@ -314,8 +320,19 @@ fn integrated_shell(shell: &str, rc: &str) -> (Session, tempfile::TempDir, tempf
         Arc::new(|| {}),
     )
     .unwrap();
-    wait_until(|| visible(&session).contains("READY>"));
+    wait_for_prompt(&session);
     (session, home, files)
+}
+fn wait_for_prompt(session: &Session) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !visible(session).contains("READY>") {
+        assert!(
+            Instant::now() < deadline,
+            "Shell prompt did not appear; terminal:\n{}",
+            visible(session)
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 fn last_output(session: &Session) -> Option<String> {
     session
@@ -404,7 +421,7 @@ fn zsh_integration_restores_zdotdir_changed_by_zshenv() {
     std::fs::create_dir(&redirected).unwrap();
     std::fs::write(
         original.join(".zshenv"),
-        "ZDOTDIR=$HOME/'new dots'\nexport VT_ORIGINAL_READ=yes\n",
+        "skip_global_compinit=1\nZDOTDIR=$HOME/'new dots'\nexport VT_ORIGINAL_READ=yes\n",
     )
     .unwrap();
     std::fs::write(
@@ -429,7 +446,7 @@ fn zsh_integration_restores_zdotdir_changed_by_zshenv() {
         Arc::new(|| {}),
     )
     .unwrap();
-    wait_until(|| visible(&session).contains("READY>"));
+    wait_for_prompt(&session);
     session
         .input(
             b"printf '%s:%s:%s\\n' \"$VT_ORIGINAL_READ\" \"$VT_RC_READ\" \"$ZDOTDIR\"\r".to_vec(),

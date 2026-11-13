@@ -1,10 +1,10 @@
 # Builds the tagged GitHub release. To build an unreleased checkout instead:
-#   git archive --prefix=vibeterm-0.1.1/ -o packaging/vibeterm-0.1.1.tar.gz HEAD
+#   git archive --prefix=vibeterm-0.2.0/ -o packaging/vibeterm-0.2.0.tar.gz HEAD
 #   cd packaging && makepkg -f --skipchecksums
 pkgname=vibeterm
-pkgver=0.1.1
+pkgver=0.2.0
 pkgrel=1
-pkgdesc='Native GPU-rendered terminal for Linux with tabs, splits and search (early preview)'
+pkgdesc='Native GPU-rendered terminal for Linux with tabs, splits and search'
 arch=('x86_64' 'aarch64')
 url='https://github.com/lfreixial/vibeterm'
 license=('MIT')
@@ -15,7 +15,7 @@ optdepends=('vulkan-driver: hardware-accelerated rendering'
             'mesa: OpenGL fallback when no Vulkan driver is available'
             'ttf-nerd-fonts-symbols: icons used by many shell prompts')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('aca03bd1e03dc5bdfd4588e39eb60ecb7a6431d9e7251d3c9ae4edbac6fc2e3f')
+sha256sums=('95f3a95cc24c6e8ed55ff695eae556e5cc8eea3160d75f3b712c11af311b9290')
 
 prepare() {
   cd "$pkgname-$pkgver"

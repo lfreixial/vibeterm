@@ -39,21 +39,24 @@ Fixtures: `visual-fixture.py` emits ANSI/Unicode; `throughput.py` emits a fixed 
 `examples/replay.rs` measures parser throughput alone; `measure.py` samples idle
 CPU/RSS and release diagnostics. Do not equate those figures with physical latency.
 
-The GitHub workflow is added but has not run remotely. Packaging is local only;
-no package installation or AUR publication was performed.
+GitHub Actions runs checks, builds tagged releases, and publishes the website.
+No AUR publication is automated.
 
 ## Releasing
 
-1. Set `version` in `Cargo.toml` and `pkgver` in `packaging/PKGBUILD`, run
-   `cargo build --locked` so `Cargo.lock` matches, and add a `CHANGELOG.md` section.
-2. Merge to `main`, then tag and push: `git tag v0.1.0 && git push origin v0.1.0`.
+1. Update the application version in `Cargo.toml` and `Cargo.lock`, add a
+   `CHANGELOG.md` section, and update README/website download links. Keep the Arch
+   recipe pinned to the previous tag until the new source archive can be hashed.
+2. Merge to `main`, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
 3. `.github/workflows/release.yml` checks the tag matches `Cargo.toml`, runs the
    tests, builds on Ubuntu 24.04 (so older glibc versions can run it) and publishes a
-   pre-release with the binary tarball, its SHA-256 and the changelog section as notes.
-4. Set `sha256sums` in the PKGBUILD to the digest of GitHub's source tarball for the
-   tag: `curl -sfL https://github.com/lfreixial/vibeterm/archive/refs/tags/v0.1.0.tar.gz | sha256sum`
+   full release marked Latest for stable tags, or a pre-release for tags with a
+   suffix (such as `v0.2.0-rc.1`). Both include the binary tarball, its SHA-256, and
+   the changelog section as notes.
+4. After publishing, update `pkgver` in the PKGBUILD and set `sha256sums` to the
+   digest of GitHub's source tarball for the tag: `curl -sfL https://github.com/lfreixial/vibeterm/archive/refs/tags/v0.2.0.tar.gz | sha256sum`
    (`-f` matters: without it an error page would be hashed). Confirm with `makepkg -f`.
 
 To test the package before tagging, build a tarball laid out like GitHub's:
-`git archive --prefix=vibeterm-0.1.0/ -o packaging/vibeterm-0.1.0.tar.gz HEAD`, then
+`git archive --prefix=vibeterm-0.2.0/ -o packaging/vibeterm-0.2.0.tar.gz HEAD`, then
 `cd packaging && makepkg -f --skipchecksums`.

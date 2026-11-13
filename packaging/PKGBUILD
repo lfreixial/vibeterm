@@ -1,8 +1,8 @@
 # Builds the tagged GitHub release. To build an unreleased checkout instead:
-#   git archive --prefix=vibeterm-0.1.0/ -o packaging/vibeterm-0.1.0.tar.gz HEAD
+#   git archive --prefix=vibeterm-0.1.1/ -o packaging/vibeterm-0.1.1.tar.gz HEAD
 #   cd packaging && makepkg -f --skipchecksums
 pkgname=vibeterm
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='Native GPU-rendered terminal for Linux with tabs, splits and search (early preview)'
 arch=('x86_64' 'aarch64')
@@ -15,7 +15,8 @@ optdepends=('vulkan-driver: hardware-accelerated rendering'
             'mesa: OpenGL fallback when no Vulkan driver is available'
             'ttf-nerd-fonts-symbols: icons used by many shell prompts')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('afde7ca13438143990766222d67a7149b337c702c3f236ebfafe320327bb08fe')
+# Pin GitHub's source archive digest after the release tag exists.
+sha256sums=('SKIP')
 
 prepare() {
   cd "$pkgname-$pkgver"

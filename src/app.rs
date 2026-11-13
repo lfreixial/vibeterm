@@ -1377,7 +1377,9 @@ impl ApplicationHandler<Event> for App {
                     && button == MouseButton::Left
                     && let Some((id, link)) = state.link_at_mouse(true)
                 {
+                    state.notice = None;
                     state.open_link(id, link, &self.config);
+                    state.redraw();
                     return;
                 }
                 if pressed {
@@ -1569,12 +1571,12 @@ impl ApplicationHandler<Event> for App {
                     .search
                     .as_ref()
                     .map(|ui| format!("Find > {}{}  ·  {}", ui.query, state.preedit, ui.status))
+                    .or_else(|| state.notice.clone())
                     .or_else(|| {
                         state.hovered_link.as_ref().map(|(_, link)| {
                             format!("Ctrl+click to open · {}", link.target.label())
                         })
                     })
-                    .or_else(|| state.notice.clone())
                     .unwrap_or_else(|| {
                         if current.snapshot.offset > 0 {
                             format!(

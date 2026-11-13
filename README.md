@@ -161,7 +161,10 @@ Text paste and middle-click primary-selection paste continue to work as before.
 
 Hold **Ctrl** over a URL or file reference to underline it and preview its target;
 **Ctrl+click** opens it with the system default application. This also works with
-HTTP(S) OSC 8 hyperlinks, wrapped text, and scrollback. Relative file paths use the
+HTTP(S) OSC 8 hyperlinks, wrapped text, and scrollback. Common bare domains such as
+`google.com` and `www.example.org` open with HTTPS; an existing local path takes
+precedence. Use `./` to explicitly select a local file with a domain-like name.
+Relative file paths use the
 clicked pane's current shell directory. Quoted paths may contain spaces.
 
 To open `src/main.rs:42:7` at a specific editor location, configure an external GUI

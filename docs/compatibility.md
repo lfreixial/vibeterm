@@ -21,7 +21,7 @@ Rust 1.90.0. Engine tests, real PTYs, and desktop interaction are distinguished 
 | Wrapped/wide selection text | Engine-tested | Exact string assertion |
 | Physical selection / copy / middle-click primary paste | User-verified | Owner reports these work (2026-10-23); display backend not specified |
 | Clipboard paste shortcut / cross-backend mouse coverage | Not fully verified | KWin prevented synthetic pointer targeting; broader manual coverage pending |
-| HTTP(S) URLs / OSC 8 links / local file references | Engine/argv tests | Wrapped, Unicode, scrollback and quoted paths covered; real desktop Ctrl+click pending |
+| HTTP(S) URLs / OSC 8 links / local file references | Engine/argv tests; explicit HTTPS user-verified | Wrapped, Unicode, scrollback, quoted paths and bare-domain fallback covered; bare-domain desktop verification pending |
 | Legacy / SGR mouse | Encoding-tested | Real TUI mouse interaction pending |
 | Application cursor keys | Encoding-tested | Desktop TUI keys also work |
 | Application keypad / Kitty keyboard | Not implemented | Kitty mode disabled |

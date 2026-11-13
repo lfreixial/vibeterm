@@ -171,3 +171,59 @@ fn editor_configuration_requires_a_path_argument() {
     assert!(Config::parse("link_editor = ['code']").is_err());
     assert!(Config::parse("link_editor = ['', '{path}']").is_err());
 }
+
+#[test]
+fn bare_domains_open_as_https_and_preserve_local_files() {
+    let dir = tempfile::tempdir().unwrap();
+    for text in [
+        "google.com",
+        "www.example.org",
+        "example.co.uk/path?q=1#part",
+        "EXAMPLE.COM",
+    ] {
+        let link = at(&terminal(&format!("({text})."), 80, 4), 0, 3).unwrap();
+        assert_eq!(link.target, Target::BareDomain(text.into()));
+        let command = links::command(&link.target, dir.path(), &[]).unwrap();
+        assert_eq!(command.get_program(), "xdg-open");
+        assert_eq!(
+            command.get_args().next().unwrap(),
+            format!("https://{text}").as_str()
+        );
+    }
+    std::fs::write(dir.path().join("google.com"), "local fixture").unwrap();
+    let target = at(&terminal("google.com", 80, 4), 0, 3).unwrap().target;
+    let command = links::command(&target, dir.path(), &[]).unwrap();
+    assert_eq!(
+        command.get_args().next().unwrap(),
+        dir.path().join("google.com")
+    );
+    let editor = ["code", "{path}"].map(String::from);
+    assert_eq!(
+        links::command(&target, dir.path(), &editor)
+            .unwrap()
+            .get_program(),
+        "code"
+    );
+    for text in [
+        "main.rs",
+        "README.md",
+        "config.toml",
+        "./example.com",
+        "user@example.com",
+        "-bad.com",
+        "bad..com",
+    ] {
+        assert!(
+            !matches!(
+                at(&terminal(text, 80, 4), 0, 3).map(|link| link.target),
+                Some(Target::BareDomain(_))
+            ),
+            "{text}"
+        );
+    }
+    let wrapped = at(&terminal("google.com/search?q=terminal", 8, 5), 1, 2).unwrap();
+    assert_eq!(
+        wrapped.target,
+        Target::BareDomain("google.com/search?q=terminal".into())
+    );
+}

@@ -15,6 +15,8 @@ const MAX_CELLS: usize = 8192;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     Url(String),
+    /// Ambiguous bare web address; prefer an existing local path at open time.
+    BareDomain(String),
     File {
         path: PathBuf,
         line: Option<u32>,
@@ -31,6 +33,7 @@ impl Target {
     pub fn label(&self) -> String {
         match self {
             Self::Url(url) => url.clone(),
+            Self::BareDomain(text) => format!("https://{text} (local file if present)"),
             Self::File { path, line, column } => {
                 let mut label = path.display().to_string();
                 if let Some(line) = line {
@@ -55,12 +58,70 @@ fn url(text: &str) -> Option<Target> {
     (!host.is_empty() && !text.chars().any(|c| c.is_whitespace() || c.is_control()))
         .then(|| Target::Url(text.to_owned()))
 }
+fn bare_domain(text: &str) -> bool {
+    if text.len() > MAX_CELLS || text.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    let host = text.split(['/', '?', '#']).next().unwrap_or_default();
+    let labels: Vec<_> = host.split('.').collect();
+    if labels.len() < 2
+        || host.len() > 253
+        || labels.iter().any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    {
+        return false;
+    }
+    let suffix = labels.last().unwrap().to_ascii_lowercase();
+    // Deliberately conservative: ordinary source/document extensions stay file links.
+    let common = matches!(
+        suffix.as_str(),
+        "com"
+            | "org"
+            | "net"
+            | "edu"
+            | "gov"
+            | "io"
+            | "dev"
+            | "app"
+            | "ai"
+            | "co"
+            | "uk"
+            | "de"
+            | "fr"
+            | "pt"
+            | "eu"
+            | "info"
+            | "biz"
+            | "me"
+            | "tech"
+            | "xyz"
+            | "cloud"
+            | "site"
+            | "online"
+    );
+    let www = labels[0].eq_ignore_ascii_case("www")
+        && labels.len() >= 3
+        && suffix.len() >= 2
+        && suffix.bytes().all(|byte| byte.is_ascii_alphabetic());
+    common || www
+}
+
 fn target(text: &str) -> Option<Target> {
     if text.chars().any(char::is_control) || text.is_empty() {
         return None;
     }
     if text.contains("://") {
         return url(text);
+    }
+    if bare_domain(text) {
+        return Some(Target::BareDomain(text.to_owned()));
     }
     let mut path = text;
     let mut numbers = Vec::new();
@@ -253,6 +314,26 @@ pub fn at<T: EventListener>(term: &Term<T>, point: Point) -> Option<Link> {
 /// Build argv separately so punctuation in output cannot become a shell command.
 pub fn command(target: &Target, cwd: &Path, editor: &[String]) -> Result<Command> {
     let mut command = match target {
+        Target::BareDomain(text) => {
+            ensure!(bare_domain(text), "Invalid bare web address");
+            match cwd.join(text).canonicalize() {
+                Ok(path) => {
+                    return command(
+                        &Target::File {
+                            path,
+                            line: None,
+                            column: None,
+                        },
+                        cwd,
+                        editor,
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return command(&Target::Url(format!("https://{text}")), cwd, editor);
+                }
+                Err(error) => return Err(error).with_context(|| format!("Cannot open {text}")),
+            }
+        }
         Target::Url(uri) => {
             ensure!(url(uri).is_some(), "Unsupported link scheme");
             let mut command = Command::new("xdg-open");

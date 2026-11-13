@@ -613,6 +613,48 @@ impl State {
                 self.workspace.cycle_pane(action == Action::NextPane);
                 self.refocus();
             }
+            Action::PreviousCommand | Action::NextCommand => {
+                let found = {
+                    let session = self.session();
+                    let mut term = session.terminal.lock();
+                    session
+                        .shared
+                        .commands
+                        .lock()
+                        .unwrap()
+                        .navigate(&mut term, action == Action::PreviousCommand)
+                };
+                if found {
+                    self.redraw();
+                } else {
+                    self.notice("No earlier command in scrollback");
+                }
+            }
+            Action::CopyLastOutput => {
+                let output = self
+                    .session()
+                    .shared
+                    .commands
+                    .lock()
+                    .unwrap()
+                    .last_output()
+                    .map(str::to_owned);
+                if let Some(output) = output {
+                    if self
+                        .clipboard
+                        .try_send(ClipboardCommand::Copy(output, false))
+                        .is_ok()
+                    {
+                        self.notice("Copied last command output");
+                    } else {
+                        self.notice("Clipboard busy; try again");
+                    }
+                } else {
+                    self.notice(
+                        "No captured output; requires Bash/Zsh integration and retained scrollback",
+                    );
+                }
+            }
             Action::Copy => self.copy(false),
             Action::Paste => {
                 self.clipboard(ClipboardCommand::Paste(self.workspace.active(), false))

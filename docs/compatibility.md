@@ -9,7 +9,8 @@ Rust 1.90.0. Engine tests, real PTYs, and desktop interaction are distinguished 
 | X11/XWayland / Vulkan | Tested | Targeted script and screenshots |
 | OpenGL fallback | Not tested | Actual adapter used Vulkan |
 | Bash | Tested | Interactive command entry, resize, exit |
-| Zsh / Fish | Not tested | Installed; interactive acceptance pending |
+| Zsh | PTY-tested | Shell hooks, startup files, custom ZDOTDIR, output copy; broader interactive acceptance pending |
+| Fish | Not tested | Installed; interactive acceptance pending |
 | Neovim / tmux | Not tested | Not installed in inspected environment |
 | less | Tested on X11 | Alternate screen, PageDown, search, return to Bash |
 | btop | Not tested | Installed; interaction pending |
@@ -32,6 +33,7 @@ Rust 1.90.0. Engine tests, real PTYs, and desktop interaction are distinguished 
 | Config validation / rejected reload | Tested on X11 | Visible rejection, live shell survives, valid reload succeeds |
 | Tabs / both split directions / focus / closure | Tested on X11 | Targeted independent-shell markers, hidden exit, screenshots |
 | History search / selected-match copy | Tested on X11 | Literal history match copied through real clipboard |
+| Bash/Zsh command navigation / output copy | Engine/PTY-tested; Bash tested on X11 | Exact clipboard output via shortcut and palette; navigation screenshot checked; Zsh/custom prompt desktop coverage pending |
 | Command palette / remapped shortcuts | Tested on X11 | Palette action and live Alt+T override |
 | Automatic config watching / atomic replacement | Tested | Watcher tests and desktop PTY geometry checks |
 | Idle redraw | Tested | Feedback loop fixed; baseline recorded separately |

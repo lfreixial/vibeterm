@@ -18,6 +18,9 @@ pub enum Action {
     Palette,
     Copy,
     Paste,
+    PreviousCommand,
+    NextCommand,
+    CopyLastOutput,
     Reload,
     ZoomIn,
     ZoomOut,
@@ -26,7 +29,7 @@ pub enum Action {
     PaneZoomOut,
     PaneZoomReset,
 }
-pub const ACTIONS: [(Action, &str, &str); 19] = [
+pub const ACTIONS: [(Action, &str, &str); 22] = [
     (Action::NewTab, "New tab", "Ctrl+Shift+t"),
     (Action::SplitColumns, "Split side by side", "Ctrl+Shift+e"),
     (Action::SplitRows, "Split above and below", "Ctrl+Shift+o"),
@@ -43,6 +46,17 @@ pub const ACTIONS: [(Action, &str, &str); 19] = [
     (Action::Palette, "Command palette", "Ctrl+Shift+p"),
     (Action::Copy, "Copy selection", "Ctrl+Shift+c"),
     (Action::Paste, "Paste clipboard", "Ctrl+Shift+v"),
+    (
+        Action::PreviousCommand,
+        "Previous command",
+        "Ctrl+Shift+ArrowUp",
+    ),
+    (Action::NextCommand, "Next command", "Ctrl+Shift+ArrowDown"),
+    (
+        Action::CopyLastOutput,
+        "Copy last command output",
+        "Ctrl+Shift+y",
+    ),
     (Action::Reload, "Reload configuration", "Ctrl+Shift+r"),
     (Action::ZoomIn, "Increase font size", "Ctrl+="),
     (Action::ZoomOut, "Decrease font size", "Ctrl+-"),

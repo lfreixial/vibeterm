@@ -6,5 +6,6 @@ pub mod links;
 pub mod render;
 pub mod search;
 pub mod session;
+pub mod shell;
 pub mod watch;
 pub mod workspace;

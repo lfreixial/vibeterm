@@ -9,6 +9,7 @@ Pass --clipboard to test text/image paste without moving the pointer.
 Pass --drag to stress split resizing with pointer motion.
 Pass --workspace to test tabs, splits, search, palette and automatic reload too.
 Pass --lifecycle to test search/palette preservation when background panes exit.
+Pass --shell to test automatic Bash integration and output copying.
 """
 import ctypes as C
 import os
@@ -156,7 +157,14 @@ env["HISTFILE"] = "/dev/null"
 log = (work / "diagnostics.txt").open("w")
 config = work / "config.toml"
 config.write_text("font_size = 15\n")
-process = subprocess.Popen([binary, "--diagnostics", "--config", str(config), "-d", str(work), "-e", "/bin/bash", "--noprofile", "--norc"], env=env, stdout=log, stderr=log)
+launch = [binary, "--diagnostics", "--config", str(config), "-d", str(work)]
+if "--shell" in sys.argv:
+    env["HOME"] = str(work)
+    (work / ".bashrc").write_text("PS1='$ '\n")
+    config.write_text('font_size = 15\nshell = "/bin/bash"\n')
+else:
+    launch += ["-e", "/bin/bash", "--noprofile", "--norc"]
+process = subprocess.Popen(launch, env=env, stdout=log, stderr=log)
 try:
     window = wait_for(own_window, "Vibeterm X11 window did not appear")
     time.sleep(0.8)
@@ -210,6 +218,34 @@ try:
         time.sleep(0.3)
         print("PASS: split resizes and shell responds after 1000 pointer movements", flush=True)
     helper = Path(binary).parent / "examples/clipboard_probe"
+    if "--shell" in sys.argv:
+        assert helper.exists(), "Build examples/clipboard_probe first"
+        type_text("printf 'shell-copy\\n'\n")
+        time.sleep(0.3)
+        key(ord("Y"), 5)
+        time.sleep(0.2)
+        copied = subprocess.check_output([str(helper)], env=env, text=True)
+        assert copied == "shell-copy\n\n", repr(copied)
+        type_text("printf 'palette-copy\\n'\n")
+        time.sleep(0.3)
+        key(ord("P"), 5)
+        type_text("copy last command output")
+        key(0xff0d)
+        time.sleep(0.2)
+        copied = subprocess.check_output([str(helper)], env=env, text=True)
+        assert copied == "palette-copy\n\n", repr(copied)
+        print("PASS: automatic Bash integration; shortcut and palette copy exact output", flush=True)
+        type_text("printf 'NAV-OLD\\n'; seq 1 60\n")
+        time.sleep(0.3)
+        type_text("printf 'NAV-NEW\\n'; seq 1 60\n")
+        time.sleep(0.3)
+        key(0xff52, 5)  # Ctrl+Shift+Up
+        time.sleep(0.2)
+        subprocess.run(["import", "-window", hex(window), str(work / "command-navigation.png")], check=True)
+        key(0xff54, 5)  # Ctrl+Shift+Down
+        type_text("printf nav-returned > navigation.txt\n")
+        wait_for(lambda: (work / "navigation.txt").exists(), "Navigation did not return to live shell")
+        print("PASS: command navigation shortcuts return to a responsive shell (screenshot for position)", flush=True)
     if helper.exists() and "--pointer" in sys.argv:
         type_text("printf '\\033[2J\\033[Hcopyme\\r\\n'\n")
         time.sleep(0.3)

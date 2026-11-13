@@ -20,6 +20,7 @@ pub struct Config {
     pub background: String,
     pub accent: String,
     pub shell: Option<String>,
+    pub shell_integration: bool,
     /// External GUI editor argv; placeholders: {path}, {line}, {column}.
     pub link_editor: Vec<String>,
     pub link_single_click: bool,
@@ -50,6 +51,7 @@ impl Default for Config {
             background: "#171b24".into(),
             accent: "#80cbc4".into(),
             shell: None,
+            shell_integration: true,
             link_editor: Vec::new(),
             link_single_click: false,
             keybindings: Default::default(),

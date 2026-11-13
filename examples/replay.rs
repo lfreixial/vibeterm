@@ -1,5 +1,6 @@
 //! Synthetic parser throughput only: this deliberately excludes rendering and PTY I/O.
-//! Usage: replay [LINES] [mixed|plain]
+//! Usage: replay [LINES] [mixed|plain] [tracked|bare]
+//! Default includes the shell tracking used by the application.
 use alacritty_terminal::{
     event::VoidListener,
     term::Term,
@@ -9,6 +10,7 @@ use std::time::Instant;
 use vibeterm::{
     config::Config,
     session::{Size, engine_config},
+    shell::{History, Tracked},
 };
 
 fn main() {
@@ -35,15 +37,27 @@ fn main() {
         "\x1b[38;2;128;203;196m0123456789 abcdefghijklmnopqrstuvwxyz\x1b[0m café 界 a\u{301}\r\n"
     };
     let fixture = line.repeat(100);
+    let tracked = std::env::args().nth(3).as_deref() != Some("bare");
+    let mut history = History::default();
     let start = Instant::now();
     let batches = lines.div_ceil(100);
     for _ in 0..batches {
-        parser.advance(&mut terminal, fixture.as_bytes());
+        if tracked {
+            parser.advance(
+                &mut Tracked {
+                    term: &mut terminal,
+                    history: &mut history,
+                },
+                fixture.as_bytes(),
+            );
+        } else {
+            parser.advance(&mut terminal, fixture.as_bytes());
+        }
     }
     let elapsed = start.elapsed().as_secs_f64();
     let bytes = batches * fixture.len();
     println!(
-        "parser-only: {bytes} bytes, {} lines, {:.6} s, {:.2} MiB/s; 110x32, scrollback=10000",
+        "parser-only (tracked={tracked}): {bytes} bytes, {} lines, {:.6} s, {:.2} MiB/s; 110x32, scrollback=10000",
         batches * 100,
         elapsed,
         bytes as f64 / 1048576.0 / elapsed

@@ -51,6 +51,18 @@ focused shell's current directory (read from `/proc`, so no shell integration is
 falling back to the launch directory. They do not repeat a CLI `-e` command.
 Shell exit closes its pane unless `--hold` is set; closing the last pane closes the window.
 
+Bash and Zsh panes automatically get command navigation and output copying:
+
+- **Ctrl+Shift+Up / Down:** jump to the previous / next command in scrollback.
+- **Ctrl+Shift+Y:** copy the last completed command's output, without its command or prompt.
+- All three actions also appear in the command palette (**Ctrl+Shift+P**).
+
+Your startup files are read as usual and are never edited. Set `shell_integration = false`
+to disable automatic hooks for new panes. Explicit `-e` commands are unchanged.
+Navigation retains up to 1,024 commands still in scrollback. Reflow or screen editing
+resets navigation; the most recently completed output remains available after resizing.
+See [shell integration](docs/shell-integration.md) for compatibility and limits.
+
 ## Build
 
 Rust **1.90.0** is the pinned toolchain/MSRV; `Cargo.lock` pins application dependencies.

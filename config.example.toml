@@ -17,6 +17,7 @@ accent = "#80cbc4"
 # link_single_click = true
 # Optional GUI editor argv for file:line:column references (no shell expansion):
 # link_editor = ["code", "--goto", "{path}:{line}:{column}"]
+# shell_integration = true # Bash/Zsh command navigation/output copy; applies to new panes
 # shell = "/bin/zsh"   # Default: $SHELL, then /bin/sh; arguments use CLI -e
 
 # Optional shortcut overrides. Unspecified actions retain their defaults.
@@ -35,6 +36,9 @@ accent = "#80cbc4"
 # palette = "Ctrl+Shift+p"
 # copy = "Ctrl+Shift+c"
 # paste = "Ctrl+Shift+v"
+# previous_command = "Ctrl+Shift+ArrowUp"
+# next_command = "Ctrl+Shift+ArrowDown"
+# copy_last_output = "Ctrl+Shift+y"
 # reload = "Ctrl+Shift+r"
 # zoom_in = "Ctrl+="
 # zoom_out = "Ctrl+-"

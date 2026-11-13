@@ -206,7 +206,7 @@ impl State {
             self.gap(),
             self.mouse.x as f32,
             self.mouse.y as f32,
-            3.0 * self.renderer.scale,
+            6.0 * self.renderer.scale,
         )
     }
     fn set_cursor_icon(&mut self, icon: CursorIcon) {
@@ -1170,7 +1170,11 @@ impl ApplicationHandler<Event> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let previous = state.cell();
+                let previous_divider = state.divider();
                 state.mouse = position;
+                if previous_divider != state.divider() {
+                    state.redraw();
+                }
                 if state.palette.is_some() {
                     return;
                 }
@@ -1229,6 +1233,11 @@ impl ApplicationHandler<Event> for App {
                     ));
                 }
             }
+            WindowEvent::CursorLeft { .. } => {
+                state.mouse = PhysicalPosition::new(-1.0, -1.0);
+                state.set_cursor_icon(CursorIcon::Default);
+                state.redraw();
+            }
             WindowEvent::MouseInput {
                 state: button_state,
                 button,
@@ -1247,6 +1256,7 @@ impl ApplicationHandler<Event> for App {
                     && let Some(divider) = state.divider()
                 {
                     state.drag = Some(divider);
+                    state.redraw();
                     return;
                 }
                 if pressed && button == MouseButton::Left {
@@ -1515,10 +1525,36 @@ impl ApplicationHandler<Event> for App {
                         .chain(std::iter::once("↑↓ choose · Enter run · Esc close".into()))
                         .collect(),
                 });
-                match state
-                    .renderer
-                    .draw(&frames, &self.config, &status, &tabs, overlay.as_ref())
-                {
+                let highlighted = state
+                    .drag
+                    .clone()
+                    .or_else(|| state.pressed.is_none().then(|| state.divider()).flatten());
+                let dividers: Vec<_> = state
+                    .workspace
+                    .dividers(
+                        state.renderer.content_rect(state.workspace.tabs.len()),
+                        state.gap(),
+                    )
+                    .into_iter()
+                    .map(|(axis, rect)| {
+                        let divider = state.workspace.divider_at(
+                            state.renderer.content_rect(state.workspace.tabs.len()),
+                            state.gap(),
+                            rect.x + rect.width / 2.0,
+                            rect.y + rect.height / 2.0,
+                            0.0,
+                        );
+                        (axis, rect, highlighted.is_some() && highlighted == divider)
+                    })
+                    .collect();
+                match state.renderer.draw(
+                    &frames,
+                    &self.config,
+                    &status,
+                    &tabs,
+                    overlay.as_ref(),
+                    &dividers,
+                ) {
                     Ok(true) => {
                         state.retry = None;
                         if state.renderer.frames == 1 && self.args.diagnostics {

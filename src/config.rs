@@ -20,6 +20,9 @@ pub struct Config {
     pub background: String,
     pub accent: String,
     pub shell: Option<String>,
+    /// External GUI editor argv; placeholders: {path}, {line}, {column}.
+    pub link_editor: Vec<String>,
+    pub link_single_click: bool,
     pub keybindings: std::collections::BTreeMap<crate::actions::Action, String>,
 }
 
@@ -47,6 +50,8 @@ impl Default for Config {
             background: "#171b24".into(),
             accent: "#80cbc4".into(),
             shell: None,
+            link_editor: Vec::new(),
+            link_single_click: false,
             keybindings: Default::default(),
         }
     }
@@ -83,6 +88,16 @@ impl Config {
         }
         for color in [&config.foreground, &config.background, &config.accent] {
             parse_color(color)?;
+        }
+        if !config.link_editor.is_empty() {
+            anyhow::ensure!(
+                !config.link_editor[0].is_empty()
+                    && config.link_editor.iter().all(|arg| !arg.contains('\0'))
+                    && config.link_editor[1..]
+                        .iter()
+                        .any(|arg| arg.contains("{path}")),
+                "link_editor must contain a program and a {{path}} argument"
+            );
         }
         crate::actions::validate(&config.keybindings)?;
         Ok(config)

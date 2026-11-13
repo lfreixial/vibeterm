@@ -21,6 +21,29 @@ impl ScrollAccumulator {
     }
 }
 
+/// A click becomes a drag permanently once it crosses the logical-pixel threshold.
+#[derive(Clone, Copy)]
+pub struct ClickGesture {
+    origin: [f64; 2],
+    threshold: f64,
+    dragged: bool,
+}
+impl ClickGesture {
+    pub fn new(origin: [f64; 2], scale: f64) -> Self {
+        Self {
+            origin,
+            threshold: 4.0 * scale,
+            dragged: false,
+        }
+    }
+    pub fn update(&mut self, position: [f64; 2]) -> bool {
+        let dx = position[0] - self.origin[0];
+        let dy = position[1] - self.origin[1];
+        self.dragged |= dx * dx + dy * dy >= self.threshold * self.threshold;
+        self.dragged
+    }
+}
+
 /// With Control held, non-Latin layouts report e.g. Cyrillic letters; map the physical
 /// key back to its US letter so Ctrl+C, Ctrl+D and shortcuts keep working.
 pub fn latin(key: &Key, physical: PhysicalKey, mods: ModifiersState) -> Key {
@@ -233,6 +256,18 @@ pub fn mouse(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn click_gesture_scales_and_cannot_revert_from_drag_to_click() {
+        for scale in [1.0, 1.5, 2.0] {
+            let mut gesture = super::ClickGesture::new([10.0, 20.0], scale);
+            assert!(!gesture.update([10.0 + 3.0 * scale, 20.0]));
+            assert!(gesture.update([10.0 + 4.0 * scale, 20.0]));
+            assert!(gesture.update([10.0, 20.0]));
+            let mut diagonal = super::ClickGesture::new([0.0, 0.0], scale);
+            assert!(diagonal.update([3.0 * scale, 3.0 * scale]));
+        }
+    }
+
     #[test]
     fn fractional_wheel_motion_accumulates_in_both_directions() {
         for direction in [-1.0, 1.0] {

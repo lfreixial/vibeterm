@@ -469,6 +469,7 @@ pub struct PaneFrame<'a> {
     pub snapshot: &'a Snapshot,
     pub damage: Damage,
     pub active: bool,
+    pub link: Option<&'a crate::links::Link>,
 }
 pub struct TabLabel {
     pub text: String,
@@ -1360,6 +1361,36 @@ impl Renderer {
         let mut vertices = Vec::new();
         let mut glyphs = Vec::new();
         if overlay.is_none() {
+            for pane in panes {
+                if let Some(link) = pane.link {
+                    let offset = pane.snapshot.offset as i32;
+                    let first = (link.start.line.0 + offset).max(0);
+                    let last = (link.end.line.0 + offset).min(pane.snapshot.rows.len() as i32 - 1);
+                    for row in first..=last {
+                        let start = if row == link.start.line.0 + offset {
+                            link.start.column.0
+                        } else {
+                            0
+                        };
+                        let end = if row == link.end.line.0 + offset {
+                            link.end.column.0 + 1
+                        } else {
+                            pane.snapshot.columns
+                        };
+                        self.rectangle(
+                            &mut vertices,
+                            pane.rect.x + self.padding + start as f32 * pane.metrics.cell_width,
+                            pane.rect.y
+                                + self.padding
+                                + (row + 1) as f32 * pane.metrics.cell_height
+                                - self.scale,
+                            (end - start) as f32 * pane.metrics.cell_width,
+                            self.scale,
+                            parse_color(&config.accent)?,
+                        );
+                    }
+                }
+            }
             for &(axis, rect, highlighted) in dividers {
                 let thickness = (if highlighted { 3.0 } else { 2.0 }) * self.scale;
                 let line = match axis {

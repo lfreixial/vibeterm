@@ -154,3 +154,70 @@ every IME cursor-area update with an empty preedit, which triggered a redraw; no
 IME events are now ignored. Output floods damage every row, so they repaint fully and
 add one canvas copy: plain/unicode/redraw throughput measured 136/133/162 MiB/s,
 within ≈3% of the previous run.
+
+
+## Interaction follow-up — 2026-11-13
+
+Baseline: v0.1.1, X11/XWayland (now the default when DISPLAY exists), same local
+AMD GPU/240 Hz desktop. These measurements are not directly comparable with the
+older native-Wayland comparison above. Desktop runs were sequential, with other
+applications running; treat single-run throughput/startup values as observations.
+
+`examples/interaction_probe.rs` provides a repeatable **headless PTY** probe:
+
+```sh
+cargo run --release --locked --example interaction_probe
+```
+
+A burst of 5,000 resize requests while the terminal lock is held models a busy
+renderer/parser. The old 32-entry input queue rejected 4,967 requests in all three
+runs and failed to reach the final requested width before the five-second deadline.
+The new separate resize slot accepted all requests and reached the final width in
+all three runs (0.131–0.151 ms from enqueue start through the post-release check).
+This controlled empty-history test establishes queue correctness, not real-world
+drag latency or reflow cost with a full history. Regression tests also verify the
+kernel PTY size and that queued keyboard input still reaches the child.
+
+| Headless PTY measurement, three runs | Before | After |
+| --- | --- | --- |
+| Rejected requests per 5,000-resize burst | 4,967 | 0 |
+| Final requested width reached | No | Yes |
+| Input-to-title-ack p95, no background output | 0.159 ms | 0.156–0.158 ms |
+| Input-to-title-ack p95, three busy background sessions | 0.165–0.311 ms | 0.167–0.311 ms |
+
+The acknowledgement probe polls every 100 microseconds and does not render a
+window. Its polling/scheduling floor dominates these tiny values; there is no
+established typing-latency improvement. Raw runs:
+[before](interaction-before.txt), [after](interaction-after.txt).
+
+`--diagnostics` now splits renderer frame wall time into CPU preparation/submission,
+surface acquisition, and the presentation call. On one million-line desktop run
+with MangoHud disabled, the updated build measured:
+
+| Component | p50 | p95 |
+| --- | --- | --- |
+| Renderer total | 5.892 ms | 6.106 ms |
+| CPU preparation/submission | 0.270 ms | 0.337 ms |
+| Surface acquisition wait | 5.614 ms | 5.829 ms |
+| Presentation call | 0.011 ms | 0.014 ms |
+
+These are CPU wall-clock intervals inside the renderer, not GPU execution,
+terminal snapshot/lock time, or physical key-to-photon latency. Component
+percentiles need not add up. The major wait in this run is surface acquisition;
+no presentation-mode or frame-latency tradeoff was changed.
+
+A separate baseline check found the inherited MangoHud overlay affects idle CPU
+and startup: a four-second idle sample reported 2% of one core with it enabled,
+and 0% with it disabled (both essentially idle rendering). Three subsequent warm
+first-frame observations were 65–67 ms with it enabled and 32–36 ms disabled.
+These are local sequential samples, not a universal speedup claim. The application
+does not override the user's overlay settings. For an overlay-free baseline:
+
+```sh
+DISABLE_MANGOHUD=1 python3 scripts/measure.py target/release/vibeterm
+```
+
+Million-line process wall time without the overlay was 0.565 s before and 0.580 s
+after, a single-run difference that does not establish a throughput change.
+Real pointer-drag latency, GPU execution timings and multi-monitor interaction
+still require desktop/manual measurement.

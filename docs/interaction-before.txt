@@ -1,0 +1,11 @@
+resize burst: rejected=4967/5000 enqueue_ms=0.180 final_columns=112 settle_ms=5000.188
+PTY ack with 0 background floods: p50_ms=0.157 p95_ms=0.159 max_ms=0.160
+PTY ack with 3 background floods: p50_ms=0.157 p95_ms=0.165 max_ms=0.622
+
+resize burst: rejected=4967/5000 enqueue_ms=0.179 final_columns=112 settle_ms=5000.741
+PTY ack with 0 background floods: p50_ms=0.156 p95_ms=0.159 max_ms=0.161
+PTY ack with 3 background floods: p50_ms=0.157 p95_ms=0.167 max_ms=0.619
+
+resize burst: rejected=4967/5000 enqueue_ms=0.192 final_columns=87 settle_ms=5000.570
+PTY ack with 0 background floods: p50_ms=0.157 p95_ms=0.159 max_ms=0.177
+PTY ack with 3 background floods: p50_ms=0.157 p95_ms=0.311 max_ms=0.623

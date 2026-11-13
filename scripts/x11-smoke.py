@@ -8,6 +8,7 @@ the pointer into the test window and restores its original position afterward.
 Pass --clipboard to test text/image paste without moving the pointer.
 Pass --drag to stress split resizing with pointer motion.
 Pass --workspace to test tabs, splits, search, palette and automatic reload too.
+Pass --lifecycle to test search/palette preservation when background panes exit.
 """
 import ctypes as C
 import os
@@ -284,6 +285,9 @@ try:
             time.sleep(0.15)
             subprocess.run(["import", "-window", hex(window), str(work / name)], check=True)
         run(work, config, key, type_text, wait_for, capture, binary, env)
+    if "--lifecycle" in sys.argv:
+        from lifecycle_checks import run
+        run(work, config, key, type_text, wait_for, binary, env)
     type_text("exit\n")
     assert process.wait(timeout=5) == 0
     print("PASS: shell exit closes window and reaps process", flush=True)

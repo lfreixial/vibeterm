@@ -383,7 +383,7 @@ impl State {
             }
         }
     }
-    fn refocus(&mut self) {
+    fn sync_focus(&mut self) {
         let active = self.workspace.active();
         for (id, pane) in &self.panes {
             let mut term = pane.session.terminal.lock();
@@ -397,6 +397,9 @@ impl State {
             }
             term.is_focused = focused;
         }
+    }
+    fn refocus(&mut self) {
+        self.sync_focus();
         self.wheel_lines = input::ScrollAccumulator::default();
         self.selecting = false;
         self.autoscroll = None;
@@ -411,14 +414,24 @@ impl State {
         self.blink_on = true;
         self.resize();
     }
+    /// Background lifecycle changes need layout/focus updates, not interaction resets.
+    fn refresh_layout(&mut self, previous: PaneId) {
+        if self.workspace.active() != previous {
+            self.refocus();
+        } else {
+            self.sync_focus();
+            self.resize();
+        }
+    }
     fn close_pane(&mut self, id: PaneId) {
+        let previous = self.workspace.active();
         if let Some(pane) = self.panes.remove(&id) {
             pane.session.close();
             std::thread::spawn(move || drop(pane));
         }
         self.workspace.close(id);
         if !self.workspace.tabs.is_empty() {
-            self.refocus();
+            self.refresh_layout(previous);
         }
     }
     fn enabled(&self, action: Action) -> bool {
@@ -885,7 +898,7 @@ impl ApplicationHandler<Event> for App {
                         if previous != origin {
                             state.workspace.focus(previous);
                         }
-                        state.refocus();
+                        state.refresh_layout(previous);
                         // A short-lived child can exit before its Spawned event is delivered.
                         if state.panes[&id]
                             .session

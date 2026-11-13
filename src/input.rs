@@ -1,6 +1,26 @@
 use alacritty_terminal::term::TermMode;
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
+/// Preserve sub-line wheel motion, but don't carry it into a reversed gesture.
+#[derive(Default)]
+pub struct ScrollAccumulator {
+    remainder: f64,
+}
+impl ScrollAccumulator {
+    pub fn lines(&mut self, delta: f64) -> i32 {
+        if !delta.is_finite() || delta == 0.0 {
+            return 0;
+        }
+        if self.remainder.signum() != delta.signum() {
+            self.remainder = 0.0;
+        }
+        self.remainder += delta;
+        let lines = self.remainder.trunc();
+        self.remainder -= lines;
+        lines as i32
+    }
+}
+
 /// With Control held, non-Latin layouts report e.g. Cyrillic letters; map the physical
 /// key back to its US letter so Ctrl+C, Ctrl+D and shortcuts keep working.
 pub fn latin(key: &Key, physical: PhysicalKey, mods: ModifiersState) -> Key {
@@ -213,6 +233,32 @@ pub fn mouse(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fractional_wheel_motion_accumulates_in_both_directions() {
+        for direction in [-1.0, 1.0] {
+            let mut scroll = super::ScrollAccumulator::default();
+            let steps: Vec<_> = (0..8).map(|_| scroll.lines(direction * 0.25)).collect();
+            assert_eq!(
+                steps,
+                vec![0, 0, 0, direction as i32, 0, 0, 0, direction as i32]
+            );
+            assert_eq!(scroll.lines(direction * 3.0), direction as i32 * 3);
+        }
+    }
+
+    #[test]
+    fn reversing_wheel_direction_discards_the_previous_fraction() {
+        let mut scroll = super::ScrollAccumulator::default();
+        assert_eq!(scroll.lines(0.75), 0);
+        assert_eq!(scroll.lines(0.0), 0);
+        assert_eq!(scroll.lines(-0.5), 0);
+        assert_eq!(scroll.lines(-0.5), -1);
+        assert_eq!(scroll.lines(2.5), 2);
+        assert_eq!(scroll.lines(f64::NAN), 0);
+        assert_eq!(scroll.lines(f64::INFINITY), 0);
+        assert_eq!(scroll.lines(0.5), 1);
+    }
+
     use super::*;
     #[test]
     fn cursor_modes_modifiers_and_control_keys() {

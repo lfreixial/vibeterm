@@ -525,6 +525,7 @@ pub struct Renderer {
     pub footer_height: f32,
     pub scale: f32,
     pub frames: u64,
+    pub surface_configurations: u64,
     pub frame_times: VecDeque<Duration>,
     pub adapter_info: String,
     pub window: Arc<Window>,
@@ -689,6 +690,7 @@ impl Renderer {
             footer_height: 28.0,
             scale: window.scale_factor() as f32,
             frames: 0,
+            surface_configurations: 1,
             frame_times: VecDeque::with_capacity(4096),
             adapter_info,
             window,
@@ -763,6 +765,7 @@ impl Renderer {
         self.surface_config.width = size.width;
         self.surface_config.height = size.height;
         self.surface.configure(&self.device, &self.surface_config);
+        self.surface_configurations += 1;
     }
 
     pub fn surface_size(&self) -> (u32, u32) {
@@ -1315,6 +1318,7 @@ impl Renderer {
         status: &str,
         tabs: &[TabLabel],
         overlay: Option<&Overlay>,
+        dividers: &[(crate::workspace::Axis, Rect, bool)],
     ) -> Result<bool> {
         let started = Instant::now();
         let size = self.window.inner_size();
@@ -1355,6 +1359,36 @@ impl Renderer {
         }
         let mut vertices = Vec::new();
         let mut glyphs = Vec::new();
+        if overlay.is_none() {
+            for &(axis, rect, highlighted) in dividers {
+                let thickness = (if highlighted { 3.0 } else { 2.0 }) * self.scale;
+                let line = match axis {
+                    crate::workspace::Axis::Columns => Rect {
+                        x: rect.x + (rect.width - thickness.min(rect.width)) / 2.0,
+                        width: thickness.min(rect.width),
+                        ..rect
+                    },
+                    crate::workspace::Axis::Rows => Rect {
+                        y: rect.y + (rect.height - thickness.min(rect.height)) / 2.0,
+                        height: thickness.min(rect.height),
+                        ..rect
+                    },
+                };
+                let color = if highlighted {
+                    parse_color(&config.accent)?
+                } else {
+                    [85, 96, 115]
+                };
+                self.rectangle(
+                    &mut vertices,
+                    line.x,
+                    line.y,
+                    line.width,
+                    line.height,
+                    color,
+                );
+            }
+        }
         let header = self.header_height(tabs.len());
         if header > 0.0 {
             let width = size.width as f32 / tabs.len() as f32;

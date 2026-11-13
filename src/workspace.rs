@@ -159,6 +159,32 @@ impl Node {
         found.path.insert(0, side);
         Some(found)
     }
+    fn dividers(&self, rect: Rect, gap: f32, out: &mut Vec<(Axis, Rect)>) {
+        if let Self::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = self
+        {
+            let (a, b) = divide(*axis, *ratio, rect, gap);
+            let bounds = match axis {
+                Axis::Columns => Rect {
+                    x: a.x + a.width,
+                    width: b.x - a.x - a.width,
+                    ..rect
+                },
+                Axis::Rows => Rect {
+                    y: a.y + a.height,
+                    height: b.y - a.y - a.height,
+                    ..rect
+                },
+            };
+            out.push((*axis, bounds));
+            first.dividers(a, gap, out);
+            second.dividers(b, gap, out);
+        }
+    }
     fn set_ratio(&mut self, path: &[bool], value: f32) {
         match self {
             Self::Split { ratio, .. } if path.is_empty() => *ratio = value,
@@ -254,6 +280,14 @@ impl Workspace {
             self.active_tab -= 1;
         }
         self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
+    }
+    /// Gaps between panes, using the same geometry as layout and drag hit testing.
+    pub fn dividers(&self, rect: Rect, gap: f32) -> Vec<(Axis, Rect)> {
+        let mut out = Vec::new();
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            tab.root.dividers(rect, gap, &mut out);
+        }
+        out
     }
     /// The split boundary of the active tab under a point, with `slop` extra pixels
     /// of grab area on each side of the gap.

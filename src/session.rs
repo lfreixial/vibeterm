@@ -1,6 +1,7 @@
 //! One PTY owner, one byte stream, bounded input, coalesced UI notifications.
 //! A reactor thread owns all PTY I/O; a parser thread applies output in order.
 use crate::config::{Config, CursorShape};
+use crate::shell::{self, History, Tracked};
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::Dimensions,
@@ -73,6 +74,7 @@ pub struct Shared {
     pub error: Mutex<Option<String>>,
     /// Latest OSC 52 copy request per clipboard: `[clipboard, primary selection]`.
     pub clipboard: Mutex<[Option<String>; 2]>,
+    pub commands: Mutex<History>,
     /// Latest requested geometry, independent of the bounded input queue.
     resize: Mutex<Option<Size>>,
     stop: AtomicBool,
@@ -141,6 +143,7 @@ pub struct Session {
     signal: Arc<UnixStream>,
     pid: i32,
     worker: Option<JoinHandle<()>>,
+    _shell_files: Option<tempfile::TempDir>,
 }
 
 pub fn engine_config(config: &Config) -> term::Config {
@@ -175,19 +178,24 @@ impl Session {
         let pair = portable_pty::native_pty_system()
             .openpty(size.pty())
             .context("Create PTY")?;
+        let mut shell_files = None;
         let mut cmd = if let Some(program) = command.first() {
             let mut cmd = CommandBuilder::new(program);
             cmd.args(&command[1..]);
             cmd
         } else {
-            CommandBuilder::new(
-                config
-                    .shell
-                    .clone()
-                    .map(OsString::from)
-                    .or_else(|| std::env::var_os("SHELL"))
-                    .unwrap_or_else(|| "/bin/sh".into()),
-            )
+            let program = config
+                .shell
+                .clone()
+                .map(OsString::from)
+                .or_else(|| std::env::var_os("SHELL"))
+                .unwrap_or_else(|| "/bin/sh".into());
+            let mut cmd = CommandBuilder::new(&program);
+            if config.shell_integration {
+                shell_files =
+                    shell::prepare(&mut cmd, &program).context("Prepare shell integration")?;
+            }
+            cmd
         };
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -235,6 +243,7 @@ impl Session {
             title: Mutex::new("vibeterm".into()),
             error: Mutex::new(None),
             clipboard: Mutex::new([None, None]),
+            commands: Mutex::new(History::default()),
             wake,
         });
         let listener = Listener {
@@ -283,6 +292,7 @@ impl Session {
         let (output_tx, output_rx) = mpsc::sync_channel::<Vec<u8>>(OUTPUT_CHUNKS);
         let parse_term = terminal.clone();
         let parse_state = shared.clone();
+        let integration = config.shell_integration;
         let parser_thread = thread::spawn(move || {
             let (term, state) = (parse_term, parse_state);
             let mut parser = Processor::<ansi::StdSyncHandler>::new();
@@ -306,19 +316,43 @@ impl Session {
                     .flat_map(|chunk| chunk.chunks(MAX_LOCKED_PARSE))
                 {
                     let mut terminal = term.lock();
-                    parser.advance(&mut *terminal, slice);
+                    if integration {
+                        parser.advance(
+                            &mut Tracked {
+                                term: &mut *terminal,
+                                history: &mut state.commands.lock().unwrap(),
+                            },
+                            slice,
+                        );
+                    } else {
+                        parser.advance(&mut *terminal, slice);
+                    }
                     state.revision.fetch_add(1, Ordering::Release);
                 }
                 // Steady output must not postpone an expired synchronized update.
                 if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
                     let mut terminal = term.lock();
-                    parser.stop_sync(&mut *terminal);
+                    if integration {
+                        parser.stop_sync(&mut Tracked {
+                            term: &mut *terminal,
+                            history: &mut state.commands.lock().unwrap(),
+                        });
+                    } else {
+                        parser.stop_sync(&mut *terminal);
+                    }
                     state.revision.fetch_add(1, Ordering::Release);
                 }
                 state.notify();
             }
             let mut terminal = term.lock();
-            parser.stop_sync(&mut *terminal);
+            if integration {
+                parser.stop_sync(&mut Tracked {
+                    term: &mut *terminal,
+                    history: &mut state.commands.lock().unwrap(),
+                });
+            } else {
+                parser.stop_sync(&mut *terminal);
+            }
             state.revision.fetch_add(1, Ordering::Release);
         });
         let worker = thread::spawn(move || {
@@ -339,6 +373,9 @@ impl Session {
                     let size = state.resize.lock().unwrap().take().unwrap_or(size);
                     if size != last_size {
                         terminal.resize(size);
+                        if size.columns != last_size.columns || size.rows != last_size.rows {
+                            state.commands.lock().unwrap().resized();
+                        }
                         state.revision.fetch_add(1, Ordering::Release);
                         drop(terminal);
                         if let Err(error) = master.resize(size.pty()) {
@@ -501,6 +538,7 @@ impl Session {
             signal: signal_tx,
             pid,
             worker: Some(worker),
+            _shell_files: shell_files,
         })
     }
 

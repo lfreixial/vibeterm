@@ -279,3 +279,142 @@ fn closed_sessions_reject_resize_requests() {
     session.close();
     assert!(session.resize(size(100, 30)).is_err());
 }
+
+// Build the same private startup files as normal pane creation, with an isolated
+// HOME/ZDOTDIR. Passing env as argv avoids mutating the test process environment.
+fn integrated_shell(shell: &str, rc: &str) -> (Session, tempfile::TempDir, tempfile::TempDir) {
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = portable_pty::CommandBuilder::new(shell);
+    cmd.env("HOME", home.path());
+    cmd.env_remove("ZDOTDIR");
+    if shell.ends_with("bash") {
+        std::fs::write(
+            home.path().join(".bashrc"),
+            format!("PS1='READY> '\n{rc}\n"),
+        )
+        .unwrap();
+    } else {
+        std::fs::write(home.path().join(".zshenv"), "export VT_ENV_LOADED=yes\n").unwrap();
+        std::fs::write(home.path().join(".zshrc"), format!("PS1='READY> '\n{rc}\n")).unwrap();
+    }
+    let files = vibeterm::shell::prepare(&mut cmd, std::ffi::OsStr::new(shell))
+        .unwrap()
+        .unwrap();
+    let mut args: Vec<std::ffi::OsString> =
+        vec!["/usr/bin/env".into(), "-u".into(), "ZDOTDIR".into()];
+    for (key, value) in cmd.iter_extra_env_as_str() {
+        args.push(format!("{key}={value}").into());
+    }
+    args.extend(cmd.get_argv().iter().cloned());
+    let session = Session::spawn(
+        &Config::default(),
+        size(80, 10),
+        &args,
+        Some(home.path()),
+        Arc::new(|| {}),
+    )
+    .unwrap();
+    wait_until(|| visible(&session).contains("READY>"));
+    (session, home, files)
+}
+fn last_output(session: &Session) -> Option<String> {
+    session
+        .shared
+        .commands
+        .lock()
+        .unwrap()
+        .last_output()
+        .map(str::to_owned)
+}
+#[test]
+fn bash_integration_preserves_prompt_commands_status_and_copies_real_output() {
+    let (session, _home, _files) = integrated_shell(
+        "/bin/bash",
+        "PROMPT_COMMAND=('VT_STATUS=$?' 'VT_HOOK=kept')",
+    );
+    session
+        .input(b"printf '\\033[31mhello world\\033[0m\\n'; false\r".to_vec())
+        .unwrap();
+    wait_until(|| last_output(&session).as_deref() == Some("hello world\n"));
+    session
+        .input(b"printf '%s:%s\\n' \"$VT_STATUS\" \"$VT_HOOK\"\r".to_vec())
+        .unwrap();
+    wait_until(|| last_output(&session).as_deref() == Some("1:kept\n"));
+    session.input(b"printf next\r".to_vec()).unwrap();
+    wait_until(|| last_output(&session).as_deref() == Some("next"));
+}
+#[test]
+fn bash_integration_does_not_replace_an_existing_debug_trap() {
+    let (session, _home, _files) = integrated_shell("/bin/bash", "trap 'VT_TRAP=kept' DEBUG");
+    session
+        .input(b"printf 'TRAP:%s\\n' \"$VT_TRAP\"\r".to_vec())
+        .unwrap();
+    wait_until(|| visible(&session).contains("TRAP:kept"));
+    assert!(last_output(&session).is_none());
+}
+#[test]
+fn zsh_integration_preserves_startup_and_prompt_hooks() {
+    if !std::path::Path::new("/bin/zsh").exists() {
+        eprintln!("zsh unavailable; skipping real zsh integration test");
+        return;
+    }
+    let (session, _home, _files) = integrated_shell(
+        "/bin/zsh",
+        "precmd() { VT_STATUS=$?; }; vt_hook() { VT_HOOK=kept; }; precmd_functions=(vt_hook)",
+    );
+    session
+        .input(b"printf 'hello zsh\\n'; false\r".to_vec())
+        .unwrap();
+    wait_until(|| last_output(&session).as_deref() == Some("hello zsh\n"));
+    session.input(b"printf '%s:%s:%s:%s\\n' \"$VT_STATUS\" \"$VT_HOOK\" \"$VT_ENV_LOADED\" \"${ZDOTDIR-unset}\"\r".to_vec()).unwrap();
+    wait_until(|| last_output(&session).as_deref() == Some("1:kept:yes:unset\n"));
+    session.input(b"printf no-newline\r".to_vec()).unwrap();
+    wait_until(|| last_output(&session).as_deref() == Some("no-newline"));
+}
+
+#[test]
+fn zsh_integration_restores_zdotdir_changed_by_zshenv() {
+    if !std::path::Path::new("/bin/zsh").exists() {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let original = home.path().join("original dots");
+    let redirected = home.path().join("new dots");
+    std::fs::create_dir(&original).unwrap();
+    std::fs::create_dir(&redirected).unwrap();
+    std::fs::write(
+        original.join(".zshenv"),
+        "ZDOTDIR=$HOME/'new dots'\nexport VT_ORIGINAL_READ=yes\n",
+    )
+    .unwrap();
+    std::fs::write(
+        redirected.join(".zshrc"),
+        "PS1='READY> '\nexport VT_RC_READ=yes\n",
+    )
+    .unwrap();
+    let mut cmd = portable_pty::CommandBuilder::new("/bin/zsh");
+    cmd.env("HOME", home.path());
+    cmd.env("ZDOTDIR", &original);
+    let _files = vibeterm::shell::prepare(&mut cmd, std::ffi::OsStr::new("/bin/zsh")).unwrap();
+    let mut args: Vec<std::ffi::OsString> = vec!["/usr/bin/env".into()];
+    for (key, value) in cmd.iter_extra_env_as_str() {
+        args.push(format!("{key}={value}").into());
+    }
+    args.extend(cmd.get_argv().iter().cloned());
+    let session = Session::spawn(
+        &Config::default(),
+        size(80, 10),
+        &args,
+        Some(home.path()),
+        Arc::new(|| {}),
+    )
+    .unwrap();
+    wait_until(|| visible(&session).contains("READY>"));
+    session
+        .input(
+            b"printf '%s:%s:%s\\n' \"$VT_ORIGINAL_READ\" \"$VT_RC_READ\" \"$ZDOTDIR\"\r".to_vec(),
+        )
+        .unwrap();
+    let expected = format!("yes:yes:{}\n", redirected.display());
+    wait_until(|| last_output(&session).as_deref() == Some(expected.as_str()));
+}

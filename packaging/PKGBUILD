@@ -15,8 +15,7 @@ optdepends=('vulkan-driver: hardware-accelerated rendering'
             'mesa: OpenGL fallback when no Vulkan driver is available'
             'ttf-nerd-fonts-symbols: icons used by many shell prompts')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-# Pin GitHub's source archive digest after the release tag exists.
-sha256sums=('SKIP')
+sha256sums=('aca03bd1e03dc5bdfd4588e39eb60ecb7a6431d9e7251d3c9ae4edbac6fc2e3f')
 
 prepare() {
   cd "$pkgname-$pkgver"

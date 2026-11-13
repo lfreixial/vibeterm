@@ -160,6 +160,8 @@ struct State {
     /// Next selection autoscroll step while dragging beyond the pane edge.
     autoscroll: Option<Instant>,
     drag: Option<Divider>,
+    /// Coalesce pointer motion into one pane resize per rendered frame.
+    pane_resize_pending: bool,
     cursor_icon: CursorIcon,
     /// Font size from the configuration file; zoom changes `Config::font_size` only.
     configured_font_size: f32,
@@ -359,8 +361,15 @@ impl State {
         if size.width == 0 || size.height == 0 {
             return;
         }
+        if self.renderer.surface_size() != (size.width, size.height) {
+            self.renderer.resize();
+        }
+        self.resize_panes();
+        self.redraw();
+    }
+    fn resize_panes(&mut self) {
+        self.pane_resize_pending = false;
         self.ime_position = None;
-        self.renderer.resize();
         for (id, rect) in self.placements() {
             let pane = self.panes.get_mut(&id).unwrap();
             let size = self.renderer.pane_size(rect, pane.metrics);
@@ -372,7 +381,6 @@ impl State {
                 }
             }
         }
-        self.redraw();
     }
     fn refocus(&mut self) {
         let active = self.workspace.active();
@@ -768,6 +776,7 @@ impl App {
             selecting: false,
             autoscroll: None,
             drag: None,
+            pane_resize_pending: false,
             cursor_icon: CursorIcon::Default,
             configured_font_size: self.config.font_size,
             preedit: String::new(),
@@ -1169,16 +1178,10 @@ impl ApplicationHandler<Event> for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let previous = state.cell();
-                let previous_divider = state.divider();
-                state.mouse = position;
-                if previous_divider != state.divider() {
-                    state.redraw();
-                }
-                if state.palette.is_some() {
-                    return;
-                }
-                if let Some(divider) = state.drag.clone() {
+                if let Some(divider) = state.drag.clone()
+                    && state.palette.is_none()
+                {
+                    state.mouse = position;
                     let min = 2.0 * state.renderer.padding + 2.0 * state.renderer.cell_width;
                     let min = match divider.axis {
                         Axis::Columns => min,
@@ -1188,7 +1191,17 @@ impl ApplicationHandler<Event> for App {
                     state
                         .workspace
                         .drag(&divider, gap, position.x as f32, position.y as f32, min);
-                    state.resize();
+                    state.pane_resize_pending = true;
+                    state.redraw();
+                    return;
+                }
+                let previous = state.cell();
+                let previous_divider = state.divider();
+                state.mouse = position;
+                if previous_divider != state.divider() {
+                    state.redraw();
+                }
+                if state.palette.is_some() {
                     return;
                 }
                 if state.pressed.is_none() {
@@ -1400,6 +1413,9 @@ impl ApplicationHandler<Event> for App {
                 }
             }
             WindowEvent::RedrawRequested if !state.occluded => {
+                if state.pane_resize_pending {
+                    state.resize_panes();
+                }
                 let active = state.workspace.active();
                 let palette = Palette::new(&self.config);
                 let placements = state.placements();
@@ -1646,6 +1662,10 @@ pub fn run(args: Args, config: Config, config_path: PathBuf) -> Result<()> {
         && let Some(state) = &app.state
     {
         eprintln!("Frames presented: {}", state.renderer.frames);
+        eprintln!(
+            "GPU surface configurations: {}",
+            state.renderer.surface_configurations
+        );
         let mut times: Vec<_> = state.renderer.frame_times.iter().copied().collect();
         times.sort_unstable();
         if !times.is_empty() {

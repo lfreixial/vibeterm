@@ -6,6 +6,7 @@ No Python packages required. Artifacts live in a temporary directory.
 Pass --pointer to also test mouse selection and clipboard. This temporarily moves
 the pointer into the test window and restores its original position afterward.
 Pass --clipboard to test text/image paste without moving the pointer.
+Pass --drag to stress split resizing with pointer motion.
 Pass --workspace to test tabs, splits, search, palette and automatic reload too.
 """
 import ctypes as C
@@ -181,6 +182,32 @@ try:
     type_text("printf tui-returned > tui.txt\n")
     wait_for(lambda: (work / "tui.txt").exists(), "less did not return to shell")
     print("PASS: less alternate screen, PageDown, search, and clean return", flush=True)
+    if "--drag" in sys.argv:
+        key(ord("E"), 5)
+        time.sleep(0.7)
+        type_text("stty size > drag-before.txt\n")
+        wait_for(lambda: (work / "drag-before.txt").exists(), "Split shell did not start")
+        before = tuple(map(int, (work / "drag-before.txt").read_text().split()))
+        mouse(4, 450, 200)
+        try:
+            # Queue a burst of motion events; only the latest geometry needs resizing.
+            rx, ry, child = C.c_int(), C.c_int(), window_type()
+            x.XTranslateCoordinates(display, window, root, 450, 200, C.byref(rx), C.byref(ry), C.byref(child))
+            for step in range(1000):
+                xtest.XTestFakeMotionEvent(display, -1, rx.value + step // 5, ry.value, 0)
+            x.XFlush(display)
+        finally:
+            # The press was guarded above; always release it even if focus changes.
+            xtest.XTestFakeButtonEvent(display, 1, 0, 0)
+            x.XFlush(display)
+            time.sleep(0.2)
+        type_text("stty size > drag-after.txt\n")
+        wait_for(lambda: (work / "drag-after.txt").exists(), "Shell stopped responding after divider drag")
+        after = tuple(map(int, (work / "drag-after.txt").read_text().split()))
+        assert after[1] < before[1], (before, after)
+        key(ord("W"), 5)
+        time.sleep(0.3)
+        print("PASS: split resizes and shell responds after 1000 pointer movements", flush=True)
     helper = Path(binary).parent / "examples/clipboard_probe"
     if helper.exists() and "--pointer" in sys.argv:
         type_text("printf '\\033[2J\\033[Hcopyme\\r\\n'\n")

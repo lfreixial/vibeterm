@@ -2,6 +2,7 @@ pub mod actions;
 pub mod attachments;
 pub mod config;
 pub mod input;
+pub mod links;
 pub mod render;
 pub mod search;
 pub mod session;

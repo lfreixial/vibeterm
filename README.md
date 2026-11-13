@@ -159,6 +159,17 @@ Files remain available for later reads until you or the system cleans the tempor
 directory. Remote SSH/container sessions need access to those files separately.
 Text paste and middle-click primary-selection paste continue to work as before.
 
+Hold **Ctrl** over a URL or file reference to underline it and preview its target;
+**Ctrl+click** opens it with the system default application. This also works with
+HTTP(S) OSC 8 hyperlinks, wrapped text, and scrollback. Relative file paths use the
+clicked pane's current shell directory. Quoted paths may contain spaces.
+
+To open `src/main.rs:42:7` at a specific editor location, configure an external GUI
+editor, for example `link_editor = ["code", "--goto", "{path}:{line}:{column}"]`.
+Without an editor command, the default application opens the file without a line
+position. Commands are invoked with literal arguments, without shell expansion.
+Ctrl+click takes precedence over application mouse reporting when a link is found.
+
 ## Verify
 
 ```sh

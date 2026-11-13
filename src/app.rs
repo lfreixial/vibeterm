@@ -22,7 +22,7 @@ use vibeterm::{
     actions::{self, ACTIONS, Action},
     attachments,
     config::Config,
-    input,
+    input, links,
     render::{
         CellMetrics, Overlay, Palette, PaneFrame, Renderer, Snapshot, TabLabel, measure_cell,
         window_cells,
@@ -163,6 +163,7 @@ struct State {
     /// Coalesce pointer motion into one pane resize per rendered frame.
     pane_resize_pending: bool,
     cursor_icon: CursorIcon,
+    hovered_link: Option<(PaneId, links::Link)>,
     /// Font size from the configuration file; zoom changes `Config::font_size` only.
     configured_font_size: f32,
     preedit: String,
@@ -211,6 +212,63 @@ impl State {
             self.mouse.y as f32,
             6.0 * self.renderer.scale,
         )
+    }
+    fn link_at_mouse(&self, wait: bool) -> Option<(PaneId, links::Link)> {
+        if !self.modifiers.control_key()
+            || self.modifiers.alt_key()
+            || self.modifiers.super_key()
+            || self.palette.is_some()
+            || self.search.is_some()
+            || self.drag.is_some()
+            || self.selecting
+        {
+            return None;
+        }
+        let (id, rect) = self
+            .placements()
+            .into_iter()
+            .find(|(_, rect)| rect.contains(self.mouse.x as f32, self.mouse.y as f32))?;
+        let pane = &self.panes[&id];
+        let x = self.mouse.x as f32 - rect.x - self.renderer.padding;
+        let y = self.mouse.y as f32 - rect.y - self.renderer.padding;
+        if x < 0.0 || y < 0.0 {
+            return None;
+        }
+        let col = (x / pane.metrics.cell_width) as usize;
+        let row = (y / pane.metrics.cell_height) as usize;
+        let terminal = if wait {
+            Some(pane.session.terminal.lock())
+        } else {
+            pane.session.terminal.try_lock_unfair()
+        }?;
+        if col >= terminal.columns() || row >= terminal.screen_lines() {
+            return None;
+        }
+        let point = Point::new(
+            Line(row as i32 - terminal.grid().display_offset() as i32),
+            Column(col),
+        );
+        links::at(&terminal, point).map(|link| (id, link))
+    }
+    fn open_link(&self, id: PaneId, link: links::Link, config: &Config) {
+        let cwd = self.panes[&id]
+            .session
+            .cwd()
+            .unwrap_or_else(|| self.directory.clone());
+        let editor = config.link_editor.clone();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<()> {
+                let status = links::command(&link.target, &cwd, &editor)?
+                    .status()
+                    .context("Cannot launch link opener")?;
+                anyhow::ensure!(status.success(), "Link opener exited with {status}");
+                Ok(())
+            })();
+            if let Err(error) = result {
+                let _ = proxy.send_event(Event::Notice(format!("Open failed: {error:#}")));
+            }
+        });
     }
     fn set_cursor_icon(&mut self, icon: CursorIcon) {
         if self.cursor_icon != icon {
@@ -793,6 +851,7 @@ impl App {
             drag: None,
             pane_resize_pending: false,
             cursor_icon: CursorIcon::Default,
+            hovered_link: None,
             configured_font_size: self.config.font_size,
             preedit: String::new(),
             composing: false,
@@ -1034,7 +1093,10 @@ impl ApplicationHandler<Event> for App {
                 state.blink_on = true;
                 state.redraw();
             }
-            WindowEvent::ModifiersChanged(modifiers) => state.modifiers = modifiers.state(),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                state.modifiers = modifiers.state();
+                state.redraw();
+            }
             WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
                 // Compositors answer every IME cursor-area update with an empty preedit;
                 // redrawing for those doubled the frames drawn while typing.
@@ -1214,7 +1276,10 @@ impl ApplicationHandler<Event> for App {
                 let previous = state.cell();
                 let previous_divider = state.divider();
                 state.mouse = position;
-                if previous_divider != state.divider() {
+                if previous_divider != state.divider()
+                    || state.modifiers.control_key()
+                    || state.hovered_link.is_some()
+                {
                     state.redraw();
                 }
                 if state.palette.is_some() {
@@ -1307,6 +1372,13 @@ impl ApplicationHandler<Event> for App {
                         state.workspace.focus(id);
                         state.refocus();
                     }
+                }
+                if pressed
+                    && button == MouseButton::Left
+                    && let Some((id, link)) = state.link_at_mouse(true)
+                {
+                    state.open_link(id, link, &self.config);
+                    return;
                 }
                 if pressed {
                     if !state
@@ -1437,6 +1509,16 @@ impl ApplicationHandler<Event> for App {
                 if state.pane_resize_pending {
                     state.resize_panes();
                 }
+                state.hovered_link = state.link_at_mouse(false);
+                if state.drag.is_none() && state.pressed.is_none() {
+                    let icon = match state.divider().map(|divider| divider.axis) {
+                        Some(Axis::Columns) => CursorIcon::ColResize,
+                        Some(Axis::Rows) => CursorIcon::RowResize,
+                        None if state.hovered_link.is_some() => CursorIcon::Pointer,
+                        None => CursorIcon::Default,
+                    };
+                    state.set_cursor_icon(icon);
+                }
                 let active = state.workspace.active();
                 let palette = Palette::new(&self.config);
                 let placements = state.placements();
@@ -1466,6 +1548,11 @@ impl ApplicationHandler<Event> for App {
                             snapshot: &pane.snapshot,
                             damage,
                             active: id == active,
+                            link: state
+                                .hovered_link
+                                .as_ref()
+                                .filter(|(pane, _)| *pane == id)
+                                .map(|(_, link)| link),
                         }
                     })
                     .collect();
@@ -1482,6 +1569,11 @@ impl ApplicationHandler<Event> for App {
                     .search
                     .as_ref()
                     .map(|ui| format!("Find > {}{}  ·  {}", ui.query, state.preedit, ui.status))
+                    .or_else(|| {
+                        state.hovered_link.as_ref().map(|(_, link)| {
+                            format!("Ctrl+click to open · {}", link.target.label())
+                        })
+                    })
                     .or_else(|| state.notice.clone())
                     .unwrap_or_else(|| {
                         if current.snapshot.offset > 0 {

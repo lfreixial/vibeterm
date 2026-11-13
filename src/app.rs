@@ -175,6 +175,7 @@ struct State {
     notice: Option<String>,
     reload_pending: bool,
     wheel_pixels: f64,
+    wheel_lines: input::ScrollAccumulator,
     title: String,
     ime_position: Option<(usize, usize)>,
 }
@@ -399,6 +400,7 @@ impl State {
     }
     fn refocus(&mut self) {
         self.sync_focus();
+        self.wheel_lines = input::ScrollAccumulator::default();
         self.selecting = false;
         self.autoscroll = None;
         self.drag = None;
@@ -802,6 +804,7 @@ impl App {
             notice: watcher_error,
             reload_pending: false,
             wheel_pixels: 0.0,
+            wheel_lines: input::ScrollAccumulator::default(),
             title: String::new(),
             ime_position: None,
         })
@@ -1382,7 +1385,9 @@ impl ApplicationHandler<Event> for App {
                     return;
                 }
                 let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => (y * 3.0) as i32,
+                    MouseScrollDelta::LineDelta(_, y) => {
+                        state.wheel_lines.lines(f64::from(y) * 3.0)
+                    }
                     MouseScrollDelta::PixelDelta(delta) => {
                         state.wheel_pixels += delta.y;
                         let height = f64::from(state.metrics().cell_height);
@@ -1392,6 +1397,9 @@ impl ApplicationHandler<Event> for App {
                     }
                 }
                 .clamp(-100, 100);
+                if lines == 0 {
+                    return;
+                }
                 if state.reporting() {
                     let (col, row) = state.cell();
                     for _ in 0..lines.abs() {

@@ -101,7 +101,7 @@ pub fn path() -> PathBuf {
 
 pub fn parse_color(value: &str) -> Result<[u8; 3]> {
     let hex = value.strip_prefix('#').unwrap_or_default();
-    if hex.len() != 6 || !hex.is_ascii() {
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("Color must be #RRGGBB: {value}");
     }
     Ok([
@@ -116,6 +116,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn colors_require_six_hex_digits() {
+        assert_eq!(parse_color("#aB09fF").unwrap(), [171, 9, 255]);
+        for value in [
+            "#+f+f+f",
+            "#12+f34",
+            "#abcd+f",
+            "#-1-1-1",
+            "#12345g",
+            "#１２３",
+            "123456",
+            "#12345",
+            "#1234567",
+        ] {
+            assert!(parse_color(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
     fn rejects_bad_settings_and_accepts_partial_config() {
         assert_eq!(Config::parse("font_size = 18").unwrap().font_size, 18.0);
         for input in [
@@ -123,6 +141,8 @@ mod tests {
             "line_spacing = 0",
             "scrollback = 100001",
             "background = 'red'",
+            "foreground = '#+f+f+f'",
+            "accent = '#12+f34'",
             "unknown = 1",
         ] {
             assert!(Config::parse(input).is_err(), "{input}");

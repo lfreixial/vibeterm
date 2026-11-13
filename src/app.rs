@@ -20,6 +20,7 @@ use std::{
 };
 use vibeterm::{
     actions::{self, ACTIONS, Action},
+    attachments,
     config::Config,
     input,
     render::{
@@ -37,7 +38,10 @@ use winit::{
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
-    platform::modifier_supplement::KeyEventExtModifierSupplement,
+    platform::{
+        modifier_supplement::KeyEventExtModifierSupplement, wayland::EventLoopBuilderExtWayland,
+        x11::EventLoopBuilderExtX11,
+    },
     window::{CursorIcon, Window, WindowId},
 };
 
@@ -93,11 +97,22 @@ fn clipboard_worker(proxy: EventLoopProxy<Event>) -> SyncSender<ClipboardCommand
                     } else {
                         LinuxClipboardKind::Clipboard
                     };
-                    let result = clipboard
-                        .get()
-                        .clipboard(kind)
-                        .text()
-                        .map_err(|e| format!("Paste failed: {e}"));
+                    let result = if !primary {
+                        match clipboard.get_image() {
+                            Ok(image) => attachments::save_image(image)
+                                .map_err(|e| format!("Image paste failed: {e:#}")),
+                            Err(arboard::Error::ContentNotAvailable) => clipboard
+                                .get_text()
+                                .map_err(|e| format!("Paste failed: {e}")),
+                            Err(e) => Err(format!("Image paste failed: {e}")),
+                        }
+                    } else {
+                        clipboard
+                            .get()
+                            .clipboard(kind)
+                            .text()
+                            .map_err(|e| format!("Paste failed: {e}"))
+                    };
                     let _ = proxy.send_event(Event::Paste(id, result));
                 }
             }
@@ -305,6 +320,25 @@ impl State {
     fn clipboard(&mut self, command: ClipboardCommand) {
         if self.clipboard.try_send(command).is_err() {
             self.notice("Clipboard busy; try again");
+        }
+    }
+    fn paste(&mut self, id: PaneId, text: &str) {
+        if let Some(pane) = self.panes.get(&id) {
+            let bracketed = pane
+                .session
+                .terminal
+                .lock()
+                .mode()
+                .contains(TermMode::BRACKETED_PASTE);
+            if let Err(e) = pane.session.input(input::paste(text, bracketed)) {
+                self.notice(e.to_string());
+            } else {
+                let mut term = pane.session.terminal.lock();
+                term.scroll_display(Scroll::Bottom);
+                term.selection = None;
+                drop(term);
+                self.redraw();
+            }
         }
     }
     fn copy(&mut self, primary: bool) {
@@ -859,23 +893,7 @@ impl ApplicationHandler<Event> for App {
                 }
             }
             Event::Paste(id, Ok(text)) => {
-                if let Some(pane) = state.panes.get(&id) {
-                    let bracketed = pane
-                        .session
-                        .terminal
-                        .lock()
-                        .mode()
-                        .contains(TermMode::BRACKETED_PASTE);
-                    if let Err(e) = pane.session.input(input::paste(&text, bracketed)) {
-                        state.notice(e.to_string());
-                    } else {
-                        let mut term = pane.session.terminal.lock();
-                        term.scroll_display(Scroll::Bottom);
-                        term.selection = None;
-                        drop(term);
-                        state.redraw();
-                    }
-                }
+                state.paste(id, &text);
             }
             Event::Paste(_, Err(error)) | Event::Notice(error) => state.notice(error),
             Event::Search(response) => {
@@ -946,6 +964,10 @@ impl ApplicationHandler<Event> for App {
             return;
         }
         match event {
+            WindowEvent::DroppedFile(path) => match attachments::path_text(&path) {
+                Ok(text) => state.paste(state.workspace.active(), &text),
+                Err(error) => state.notice(format!("File drop failed: {error:#}")),
+            },
             WindowEvent::CloseRequested => {
                 for pane in state.panes.values() {
                     pane.session.close();
@@ -1564,9 +1586,14 @@ impl ApplicationHandler<Event> for App {
 pub fn run(args: Args, config: Config, config_path: PathBuf) -> Result<()> {
     let started = Instant::now();
     let fonts = std::thread::spawn(FontSystem::new);
-    let event_loop = EventLoop::<Event>::with_user_event()
-        .build()
-        .context("Connect to Wayland/X11 desktop")?;
+    let mut builder = EventLoop::<Event>::with_user_event();
+    if args.wayland {
+        builder.with_wayland();
+    } else if std::env::var_os("DISPLAY").is_some_and(|value| !value.is_empty()) {
+        // Winit 0.30 only implements Linux file drops on its X11 backend.
+        builder.with_x11();
+    }
+    let event_loop = builder.build().context("Connect to Wayland/X11 desktop")?;
     let proxy = event_loop.create_proxy();
     let mut app = App {
         args,

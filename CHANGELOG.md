@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.2.0 — command navigation, links, and smoother interaction
+
+This is a regular release, published as GitHub's Latest release.
+
+### Added
+- Automatic Bash/Zsh integration: Ctrl+Shift+Up/Down navigates commands, and
+  Ctrl+Shift+Y copies the last completed command's output without its prompt or
+  echoed command. These actions are also available in the command palette.
+  Startup hooks use temporary files and do not edit user shell configuration.
+- Ctrl+click opens explicit HTTP(S) URLs, OSC 8 hyperlinks, and local file
+  references through the system default application. Configure `link_editor`
+  to open file:line:column references in a chosen editor.
+- Optional `link_single_click = true` opens links on click/release while dragging
+  still selects text. Bare domains such as `google.com` do not open websites.
+- Diagnostics separate CPU frame work from surface acquisition and presentation
+  time; an interaction probe measures resize and input behavior.
+
+### Fixed
+- PTY resize bursts retain the latest geometry without filling the input queue,
+  keeping input responsive while panes are being resized.
+
+### Compatibility
+- Shell integration can be disabled with `shell_integration = false` for new
+  panes. Existing Bash DEBUG traps are preserved by skipping automatic hooks.
+- Command positions are bounded by scrollback and reset on reflow/screen editing.
+  The last completed output copy survives resizing; fullscreen application output
+  and output evicted from scrollback are not captured. See
+  [shell integration](https://github.com/lfreixial/vibeterm/blob/v0.2.0/docs/shell-integration.md).
+- Linux only. Native Wayland file drops remain unavailable. Custom shell prompt
+  frameworks, IME composition, mixed-DPI monitors, and broader compositor coverage
+  still need acceptance testing; Kitty keyboard/graphics protocols and native
+  accessibility remain unimplemented.
+
+
 ## 0.1.1 — image input and interaction fixes
 
 ### Added

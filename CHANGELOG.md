@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.1 — image input and interaction fixes
+
+### Added
+- Drag image files into the terminal or paste clipboard images with Ctrl+Shift+V
+  or Shift+Insert. Clipboard images are saved as private temporary PNGs and their
+  paths are inserted for local tools such as Codex and Claude to read.
+- Visible split dividers with hover/drag highlighting and a wider resize grab area.
+- `--wayland` to explicitly select native Wayland. X11/XWayland is now preferred
+  when available because the current window library supports Linux file drops
+  only through that backend.
+
+### Fixed
+- Split resizing no longer reconfigures the GPU surface on every pointer movement.
+  Rapid drag movements are combined into one pane resize per frame.
+- Slow touchpad and high-resolution wheel scrolling preserves fractional line
+  deltas instead of dropping small movements.
+- Color settings reject sign characters and require exactly six hexadecimal digits.
+- Background pane exits and spawn completions preserve search, the command
+  palette, selection/resize drag, and IME composition when active focus is unchanged.
+
+This remains an early preview. Native Wayland file drops are unavailable; clipboard
+image files remain in the system temporary directory until user or system cleanup.
+The known gaps listed for 0.1.0 still apply.
+
 ## 0.1.0 — first public preview
 
 An early preview of a native, GPU-rendered Linux terminal. It is usable day to day

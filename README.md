@@ -5,7 +5,7 @@
 Written in Rust with a real shell PTY and GPU text rendering: graphite surfaces,
 readable text, a quiet teal accent, and no continuous idle animation.
 
-**0.1.0 is an early preview.** Tabs, splits, scrollback search, a command palette and
+**0.1.1 is an early preview.** Tabs, splits, scrollback search, a command palette and
 live configuration are implemented, and everyday use, nvim, tmux, copy/paste and
 search have been checked by hand on KDE Wayland. IME composition, mixed-DPI monitors
 and some protocol features still need work; see [the changelog](CHANGELOG.md).

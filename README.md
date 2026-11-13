@@ -161,10 +161,9 @@ Text paste and middle-click primary-selection paste continue to work as before.
 
 Hold **Ctrl** over a URL or file reference to underline it and preview its target;
 **Ctrl+click** opens it with the system default application. This also works with
-HTTP(S) OSC 8 hyperlinks, wrapped text, and scrollback. Common bare domains such as
-`google.com` and `www.example.org` open with HTTPS; an existing local path takes
-precedence. Use `./` to explicitly select a local file with a domain-like name.
-Relative file paths use the
+HTTP(S) OSC 8 hyperlinks, wrapped text, and scrollback. Websites must include
+`http://` or `https://`; bare names such as `google.com` are treated only as local
+file candidates and never fall back to opening a website. Relative file paths use the
 clicked pane's current shell directory. Quoted paths may contain spaces.
 
 To open `src/main.rs:42:7` at a specific editor location, configure an external GUI
@@ -172,6 +171,12 @@ editor, for example `link_editor = ["code", "--goto", "{path}:{line}:{column}"]`
 Without an editor command, the default application opens the file without a line
 position. Commands are invoked with literal arguments, without shell expansion.
 Ctrl+click takes precedence over application mouse reporting when a link is found.
+
+Optional `link_single_click = true` shows links on hover without Ctrl and opens
+on left-button release over the same link. Moving four logical pixels starts a
+normal text selection and cancels opening, even if you move back before releasing.
+Shift bypasses link opening for selection. Mouse-aware terminal applications keep
+normal clicks; use Ctrl+click to open their links.
 
 ## Verify
 

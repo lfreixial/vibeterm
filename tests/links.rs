@@ -173,22 +173,17 @@ fn editor_configuration_requires_a_path_argument() {
 }
 
 #[test]
-fn bare_domains_open_as_https_and_preserve_local_files() {
+fn bare_domains_never_fall_back_to_websites() {
     let dir = tempfile::tempdir().unwrap();
     for text in [
         "google.com",
         "www.example.org",
-        "example.co.uk/path?q=1#part",
+        "example.co.uk/path",
         "EXAMPLE.COM",
     ] {
-        let link = at(&terminal(&format!("({text})."), 80, 4), 0, 3).unwrap();
-        assert_eq!(link.target, Target::BareDomain(text.into()));
-        let command = links::command(&link.target, dir.path(), &[]).unwrap();
-        assert_eq!(command.get_program(), "xdg-open");
-        assert_eq!(
-            command.get_args().next().unwrap(),
-            format!("https://{text}").as_str()
-        );
+        let link = at(&terminal(text, 80, 4), 0, 3).unwrap();
+        assert!(matches!(link.target, Target::File { .. }));
+        assert!(links::command(&link.target, dir.path(), &[]).is_err());
     }
     std::fs::write(dir.path().join("google.com"), "local fixture").unwrap();
     let target = at(&terminal("google.com", 80, 4), 0, 3).unwrap().target;
@@ -197,33 +192,21 @@ fn bare_domains_open_as_https_and_preserve_local_files() {
         command.get_args().next().unwrap(),
         dir.path().join("google.com")
     );
-    let editor = ["code", "{path}"].map(String::from);
-    assert_eq!(
-        links::command(&target, dir.path(), &editor)
+    let explicit = at(&terminal("https://google.com", 80, 4), 0, 3)
+        .unwrap()
+        .target;
+    let command = links::command(&explicit, dir.path(), &[]).unwrap();
+    assert_eq!(command.get_args().next().unwrap(), "https://google.com");
+}
+
+#[test]
+fn single_click_opening_is_explicitly_opt_in() {
+    assert!(!Config::default().link_single_click);
+    assert!(!Config::parse("").unwrap().link_single_click);
+    assert!(
+        Config::parse("link_single_click = true")
             .unwrap()
-            .get_program(),
-        "code"
+            .link_single_click
     );
-    for text in [
-        "main.rs",
-        "README.md",
-        "config.toml",
-        "./example.com",
-        "user@example.com",
-        "-bad.com",
-        "bad..com",
-    ] {
-        assert!(
-            !matches!(
-                at(&terminal(text, 80, 4), 0, 3).map(|link| link.target),
-                Some(Target::BareDomain(_))
-            ),
-            "{text}"
-        );
-    }
-    let wrapped = at(&terminal("google.com/search?q=terminal", 8, 5), 1, 2).unwrap();
-    assert_eq!(
-        wrapped.target,
-        Target::BareDomain("google.com/search?q=terminal".into())
-    );
+    assert!(Config::parse("link_single_click = 'yes'").is_err());
 }

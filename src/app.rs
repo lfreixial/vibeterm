@@ -138,6 +138,14 @@ struct Pane {
     snapshot: Snapshot,
 }
 
+struct LinkPress {
+    pane: PaneId,
+    link: links::Link,
+    point: Point,
+    side: Side,
+    gesture: input::ClickGesture,
+}
+
 struct State {
     renderer: Renderer,
     panes: BTreeMap<PaneId, Pane>,
@@ -164,6 +172,7 @@ struct State {
     pane_resize_pending: bool,
     cursor_icon: CursorIcon,
     hovered_link: Option<(PaneId, links::Link)>,
+    link_press: Option<LinkPress>,
     /// Font size from the configuration file; zoom changes `Config::font_size` only.
     configured_font_size: f32,
     preedit: String,
@@ -213,8 +222,9 @@ impl State {
             6.0 * self.renderer.scale,
         )
     }
-    fn link_at_mouse(&self, wait: bool) -> Option<(PaneId, links::Link)> {
-        if !self.modifiers.control_key()
+    fn link_at_mouse(&self, wait: bool, single_click: bool) -> Option<(PaneId, links::Link)> {
+        if (!self.modifiers.control_key() && !single_click)
+            || self.modifiers.shift_key()
             || self.modifiers.alt_key()
             || self.modifiers.super_key()
             || self.palette.is_some()
@@ -241,7 +251,10 @@ impl State {
         } else {
             pane.session.terminal.try_lock_unfair()
         }?;
-        if col >= terminal.columns() || row >= terminal.screen_lines() {
+        if (!self.modifiers.control_key() && terminal.mode().intersects(TermMode::MOUSE_MODE))
+            || col >= terminal.columns()
+            || row >= terminal.screen_lines()
+        {
             return None;
         }
         let point = Point::new(
@@ -459,6 +472,7 @@ impl State {
     fn refocus(&mut self) {
         self.sync_focus();
         self.wheel_lines = input::ScrollAccumulator::default();
+        self.link_press = None;
         self.selecting = false;
         self.autoscroll = None;
         self.drag = None;
@@ -852,6 +866,7 @@ impl App {
             pane_resize_pending: false,
             cursor_icon: CursorIcon::Default,
             hovered_link: None,
+            link_press: None,
             configured_font_size: self.config.font_size,
             preedit: String::new(),
             composing: false,
@@ -1086,6 +1101,7 @@ impl ApplicationHandler<Event> for App {
                 }
                 if !focused {
                     state.pressed = None;
+                    state.link_press = None;
                     state.selecting = false;
                     state.autoscroll = None;
                     state.drag = None;
@@ -1278,12 +1294,26 @@ impl ApplicationHandler<Event> for App {
                 state.mouse = position;
                 if previous_divider != state.divider()
                     || state.modifiers.control_key()
+                    || self.config.link_single_click
                     || state.hovered_link.is_some()
                 {
                     state.redraw();
                 }
                 if state.palette.is_some() {
                     return;
+                }
+                if let Some(press) = &mut state.link_press {
+                    if !press.gesture.update([position.x, position.y]) {
+                        return;
+                    }
+                    let press = state.link_press.take().unwrap();
+                    state.selecting = true;
+                    state.last_click = None;
+                    state.session().terminal.lock().selection = Some(Selection::new(
+                        SelectionType::Simple,
+                        press.point,
+                        press.side,
+                    ));
                 }
                 if state.pressed.is_none() {
                     let icon = match state.divider().map(|d| d.axis) {
@@ -1328,6 +1358,9 @@ impl ApplicationHandler<Event> for App {
                 }
             }
             WindowEvent::CursorLeft { .. } => {
+                if state.link_press.take().is_some() {
+                    state.pressed = None;
+                }
                 state.mouse = PhysicalPosition::new(-1.0, -1.0);
                 state.set_cursor_icon(CursorIcon::Default);
                 state.redraw();
@@ -1338,6 +1371,23 @@ impl ApplicationHandler<Event> for App {
                 ..
             } => {
                 let pressed = button_state == ElementState::Pressed;
+                if button == MouseButton::Left
+                    && !pressed
+                    && let Some(mut press) = state.link_press.take()
+                {
+                    state.pressed = None;
+                    let dragged = press.gesture.update([state.mouse.x, state.mouse.y]);
+                    if !dragged
+                        && state
+                            .link_at_mouse(true, self.config.link_single_click)
+                            .is_some_and(|(pane, link)| pane == press.pane && link == press.link)
+                    {
+                        state.notice = None;
+                        state.open_link(press.pane, press.link, &self.config);
+                    }
+                    state.redraw();
+                    return;
+                }
                 if state.palette.is_some() {
                     return;
                 }
@@ -1375,10 +1425,26 @@ impl ApplicationHandler<Event> for App {
                 }
                 if pressed
                     && button == MouseButton::Left
-                    && let Some((id, link)) = state.link_at_mouse(true)
+                    && let Some((id, link)) =
+                        state.link_at_mouse(true, self.config.link_single_click)
                 {
                     state.notice = None;
-                    state.open_link(id, link, &self.config);
+                    if state.modifiers.control_key() {
+                        state.open_link(id, link, &self.config);
+                    } else {
+                        let (point, side) = state.point();
+                        state.pressed = Some(MouseButton::Left);
+                        state.link_press = Some(LinkPress {
+                            pane: id,
+                            link,
+                            point,
+                            side,
+                            gesture: input::ClickGesture::new(
+                                [state.mouse.x, state.mouse.y],
+                                f64::from(state.renderer.scale),
+                            ),
+                        });
+                    }
                     state.redraw();
                     return;
                 }
@@ -1451,6 +1517,9 @@ impl ApplicationHandler<Event> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if state.link_press.take().is_some() {
+                    state.pressed = None;
+                }
                 if state.palette.is_some()
                     || !state
                         .active_rect()
@@ -1511,7 +1580,7 @@ impl ApplicationHandler<Event> for App {
                 if state.pane_resize_pending {
                     state.resize_panes();
                 }
-                state.hovered_link = state.link_at_mouse(false);
+                state.hovered_link = state.link_at_mouse(false, self.config.link_single_click);
                 if state.drag.is_none() && state.pressed.is_none() {
                     let icon = match state.divider().map(|divider| divider.axis) {
                         Some(Axis::Columns) => CursorIcon::ColResize,
@@ -1574,7 +1643,15 @@ impl ApplicationHandler<Event> for App {
                     .or_else(|| state.notice.clone())
                     .or_else(|| {
                         state.hovered_link.as_ref().map(|(_, link)| {
-                            format!("Ctrl+click to open · {}", link.target.label())
+                            format!(
+                                "{} to open · {}",
+                                if self.config.link_single_click && !state.reporting() {
+                                    "Click"
+                                } else {
+                                    "Ctrl+click"
+                                },
+                                link.target.label()
+                            )
                         })
                     })
                     .unwrap_or_else(|| {

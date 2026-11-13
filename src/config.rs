@@ -22,6 +22,7 @@ pub struct Config {
     pub shell: Option<String>,
     /// External GUI editor argv; placeholders: {path}, {line}, {column}.
     pub link_editor: Vec<String>,
+    pub link_single_click: bool,
     pub keybindings: std::collections::BTreeMap<crate::actions::Action, String>,
 }
 
@@ -50,6 +51,7 @@ impl Default for Config {
             accent: "#80cbc4".into(),
             shell: None,
             link_editor: Vec::new(),
+            link_single_click: false,
             keybindings: Default::default(),
         }
     }

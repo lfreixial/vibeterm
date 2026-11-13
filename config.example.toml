@@ -12,7 +12,9 @@ cursor_blink = false   # Off by default: no idle animation wakeups
 foreground = "#d8dee9"
 background = "#171b24"
 accent = "#80cbc4"
-# Ctrl+click opens URLs and files with the system default application.
+# Ctrl+click opens explicit HTTP(S) URLs and files with the system default application.
+# Opt in to opening on a plain click/release; dragging still selects text.
+# link_single_click = true
 # Optional GUI editor argv for file:line:column references (no shell expansion):
 # link_editor = ["code", "--goto", "{path}:{line}:{column}"]
 # shell = "/bin/zsh"   # Default: $SHELL, then /bin/sh; arguments use CLI -e

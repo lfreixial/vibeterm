@@ -250,3 +250,32 @@ fn programs_can_copy_but_not_read_the_clipboard() {
     wait_until(|| session.shared.exited.load(Ordering::Acquire));
     assert!(session.shared.error.lock().unwrap().is_none());
 }
+
+#[test]
+fn resize_burst_keeps_latest_geometry_without_filling_the_input_queue() {
+    let session = spawn("printf READY; read value; stty size; printf 'ACK:%s' \"$value\"");
+    wait_until(|| visible(&session).contains("READY"));
+    // Model a busy renderer/parser while pointer events keep arriving.
+    let terminal = session.terminal.lock();
+    for i in 0..5000 {
+        session.resize(size(80 + i % 40, 24)).unwrap();
+    }
+    session.resize(size(101, 37)).unwrap();
+    session.input(b"hello\r".to_vec()).unwrap();
+    drop(terminal);
+    wait_until(|| session.shared.exited.load(Ordering::Acquire));
+    let terminal = session.terminal.lock();
+    assert_eq!((terminal.columns(), terminal.screen_lines()), (101, 37));
+    drop(terminal);
+    let output = visible(&session);
+    assert!(output.contains("37 101"), "{output}");
+    assert!(output.contains("ACK:hello"), "{output}");
+    assert!(session.shared.error.lock().unwrap().is_none());
+}
+
+#[test]
+fn closed_sessions_reject_resize_requests() {
+    let session = spawn("sleep 10");
+    session.close();
+    assert!(session.resize(size(100, 30)).is_err());
+}

@@ -462,6 +462,19 @@ fn bounds(rect: Rect) -> TextBounds {
     }
 }
 
+/// CPU wall time components; these do not measure GPU execution or input-to-photon latency.
+#[derive(Clone, Copy)]
+pub struct FrameTiming {
+    pub total: Duration,
+    pub acquire: Duration,
+    pub present: Duration,
+}
+impl FrameTiming {
+    pub fn cpu(self) -> Duration {
+        self.total.saturating_sub(self.acquire + self.present)
+    }
+}
+
 pub struct PaneFrame<'a> {
     pub id: u64,
     pub rect: Rect,
@@ -527,7 +540,7 @@ pub struct Renderer {
     pub scale: f32,
     pub frames: u64,
     pub surface_configurations: u64,
-    pub frame_times: VecDeque<Duration>,
+    pub frame_times: VecDeque<FrameTiming>,
     pub adapter_info: String,
     pub window: Arc<Window>,
 }
@@ -1328,6 +1341,7 @@ impl Renderer {
             self.canvas_valid = false;
             return Ok(false);
         }
+        let acquire_started = Instant::now();
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -1341,6 +1355,7 @@ impl Renderer {
             }
             Err(error) => return Err(error).context("GPU surface failure"),
         };
+        let acquire = acquire_started.elapsed();
         self.viewport.update(
             &self.queue,
             Resolution {
@@ -1597,8 +1612,10 @@ impl Renderer {
                 .context("Render glyphs")?;
         }
         self.queue.submit(Some(encoder.finish()));
+        let present_started = Instant::now();
         self.window.pre_present_notify();
         frame.present();
+        let present = present_started.elapsed();
         self.atlas.trim();
         // CPU raster cache is independent from the bounded GPU atlas and shaped-cell LRU.
         if self.swash.image_cache.len() > 8192 {
@@ -1608,7 +1625,11 @@ impl Renderer {
         if self.frame_times.len() == 4096 {
             self.frame_times.pop_front();
         }
-        self.frame_times.push_back(started.elapsed());
+        self.frame_times.push_back(FrameTiming {
+            total: started.elapsed(),
+            acquire,
+            present,
+        });
         Ok(true)
     }
 }

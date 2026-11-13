@@ -73,6 +73,8 @@ pub struct Shared {
     pub error: Mutex<Option<String>>,
     /// Latest OSC 52 copy request per clipboard: `[clipboard, primary selection]`.
     pub clipboard: Mutex<[Option<String>; 2]>,
+    /// Latest requested geometry, independent of the bounded input queue.
+    resize: Mutex<Option<Size>>,
     stop: AtomicBool,
     wake: Wake,
 }
@@ -90,7 +92,6 @@ impl Shared {
 
 enum Command {
     Input(Vec<u8>),
-    Resize(Size),
 }
 
 #[derive(Clone)]
@@ -229,6 +230,7 @@ impl Session {
             revision: Arc::new(AtomicU64::new(0)),
             dirty: AtomicBool::new(false),
             exited: AtomicBool::new(false),
+            resize: Mutex::new(None),
             stop: AtomicBool::new(false),
             title: Mutex::new("vibeterm".into()),
             error: Mutex::new(None),
@@ -324,9 +326,28 @@ impl Session {
             let mut pending = Vec::new();
             let mut offset = 0;
             let mut wake = [0u8; 64];
+            let mut last_size = size;
             loop {
                 if state.stop.load(Ordering::Acquire) {
                     break;
+                }
+                // Never hold the request mutex while waiting for the terminal lock.
+                let resize = state.resize.lock().unwrap().take();
+                if let Some(size) = resize {
+                    let mut terminal = term.lock();
+                    // A renderer/parser lock may have delayed us: discard stale geometry.
+                    let size = state.resize.lock().unwrap().take().unwrap_or(size);
+                    if size != last_size {
+                        terminal.resize(size);
+                        state.revision.fetch_add(1, Ordering::Release);
+                        drop(terminal);
+                        if let Err(error) = master.resize(size.pty()) {
+                            state.fail(format!("PTY resize: {error}"));
+                        } else {
+                            last_size = size;
+                        }
+                        state.notify();
+                    }
                 }
                 if pending.is_empty() {
                     // Cap work per iteration so input cannot starve output.
@@ -338,16 +359,6 @@ impl Session {
                                 if !pending.is_empty() {
                                     break;
                                 }
-                            }
-                            Ok(Command::Resize(size)) => {
-                                let mut terminal = term.lock();
-                                terminal.resize(size);
-                                state.revision.fetch_add(1, Ordering::Release);
-                                if let Err(error) = master.resize(size.pty()) {
-                                    state.fail(format!("PTY resize: {error}"));
-                                }
-                                drop(terminal);
-                                state.notify();
                             }
                             Err(_) => break,
                         }
@@ -525,10 +536,15 @@ impl Session {
     }
 
     pub fn resize(&self, size: Size) -> Result<()> {
-        self.tx
-            .try_send(Command::Resize(size))
-            .map_err(|_| anyhow::anyhow!("PTY resize queue full"))?;
-        signal(&self.signal);
+        anyhow::ensure!(
+            !self.shared.stop.load(Ordering::Acquire)
+                && !self.shared.exited.load(Ordering::Acquire),
+            "Session closed"
+        );
+        let previous = self.shared.resize.lock().unwrap().replace(size);
+        if previous.is_none() {
+            signal(&self.signal);
+        }
         Ok(())
     }
 

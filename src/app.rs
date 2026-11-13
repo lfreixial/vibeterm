@@ -1858,7 +1858,12 @@ pub fn run(args: Args, config: Config, config_path: PathBuf) -> Result<()> {
             "GPU surface configurations: {}",
             state.renderer.surface_configurations
         );
-        let mut times: Vec<_> = state.renderer.frame_times.iter().copied().collect();
+        let mut times: Vec<_> = state
+            .renderer
+            .frame_times
+            .iter()
+            .map(|sample| sample.total)
+            .collect();
         times.sort_unstable();
         if !times.is_empty() {
             eprintln!(
@@ -1867,6 +1872,35 @@ pub fn run(args: Args, config: Config, config_path: PathBuf) -> Result<()> {
                 times[times.len() / 2].as_secs_f64() * 1000.0,
                 times[(times.len() * 95).div_ceil(100) - 1].as_secs_f64() * 1000.0
             );
+        }
+    }
+    if app.args.diagnostics
+        && let Some(state) = &app.state
+    {
+        for (label, component) in [
+            ("CPU preparation/submission", 0),
+            ("Surface acquisition wait", 1),
+            ("Presentation call", 2),
+        ] {
+            let mut times: Vec<_> = state
+                .renderer
+                .frame_times
+                .iter()
+                .map(|sample| match component {
+                    0 => sample.cpu(),
+                    1 => sample.acquire,
+                    _ => sample.present,
+                })
+                .collect();
+            times.sort_unstable();
+            if !times.is_empty() {
+                eprintln!(
+                    "{label}: n={}, p50={:.3} ms, p95={:.3} ms",
+                    times.len(),
+                    times[times.len() / 2].as_secs_f64() * 1000.0,
+                    times[(times.len() * 95).div_ceil(100) - 1].as_secs_f64() * 1000.0
+                );
+            }
         }
     }
     if let Some(error) = app.failure {

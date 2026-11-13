@@ -5,6 +5,7 @@ Requires a desktop, libX11, xprop, ImageMagick, and a built debug/release binary
 No Python packages required. Artifacts live in a temporary directory.
 Pass --pointer to also test mouse selection and clipboard. This temporarily moves
 the pointer into the test window and restores its original position afterward.
+Pass --clipboard to test text/image paste without moving the pointer.
 Pass --workspace to test tabs, splits, search, palette and automatic reload too.
 """
 import ctypes as C
@@ -196,6 +197,7 @@ try:
         primary = subprocess.check_output([str(helper), "primary"], env=env, text=True).strip()
         assert primary == "copyme", "Primary selection did not contain the test selection"
         print("PASS: drag selection, clipboard copy, and primary selection", flush=True)
+    if helper.exists() and ("--pointer" in sys.argv or "--clipboard" in sys.argv):
         owner = subprocess.Popen([str(helper), "copy", "printf paste-ok > paste.txt"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
             assert owner.stdout.readline().strip() == "ready"
@@ -207,8 +209,24 @@ try:
         finally:
             owner.communicate("done\n", timeout=3)
         print("PASS: clipboard paste through bracketed-paste shell mode", flush=True)
+        owner = subprocess.Popen([str(helper), "image"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            assert owner.stdout.readline().strip() == "ready"
+            type_text("printf '%s' ")
+            key(ord("V"), 5)
+            time.sleep(0.5)
+            type_text("> image-path.txt\n")
+            wait_for(lambda: (work / "image-path.txt").exists(), "Image paste did not reach Bash")
+            image_path = Path((work / "image-path.txt").read_text())
+            assert image_path.name.startswith("vibeterm-image-")
+            assert image_path.read_bytes().startswith(bytes.fromhex("89504e470d0a1a0a"))
+            assert image_path.stat().st_mode & 0o777 == 0o600
+            image_path.unlink()
+        finally:
+            owner.communicate("done\n", timeout=3)
+        print("PASS: clipboard image saved as a private PNG and pasted into Bash", flush=True)
     else:
-        print("SKIP: clipboard checks; build examples and pass --pointer to enable", flush=True)
+        print("SKIP: clipboard checks; build examples and pass --clipboard to enable", flush=True)
     config.write_text("font_size = 0\n")
     key(ord("R"), 5)
     time.sleep(0.3)

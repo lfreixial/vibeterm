@@ -20,6 +20,9 @@ pub struct Args {
     /// Print GPU and frame-count diagnostics, never terminal contents.
     #[arg(long)]
     diagnostics: bool,
+    /// Use native Wayland (file drops require X11/XWayland with the current window library).
+    #[arg(long)]
+    wayland: bool,
     /// Validate configuration without opening a window.
     #[arg(long)]
     check_config: bool,

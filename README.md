@@ -70,11 +70,10 @@ The build session installed Rust only under `/tmp`; the binary needs no Rust
 installation to run. To rebuild using that temporary compiler, see
 [development instructions](docs/development.md).
 
-Wayland is selected when available. Exercise X11/XWayland with:
-
-```sh
-env -u WAYLAND_DISPLAY WINIT_UNIX_BACKEND=x11 ./target/release/vibeterm
-```
+X11/XWayland is selected when `DISPLAY` is available so file dragging works.
+Otherwise VibeTerm uses Wayland. To explicitly select native Wayland, run
+`vibeterm --wayland`; file drops are unavailable on that backend with the current
+window library.
 
 ## Implemented
 
@@ -149,6 +148,16 @@ Releasing a selection updates primary selection; `copy_on_select` also updates t
 regular clipboard. Paste is capped at 256 KiB and strips ESC to prevent escape from
 the bracketed-paste envelope. Clipboard I/O runs off the UI thread. Wayland clipboard
 availability depends on compositor data-control support or XWayland.
+
+Drag image files from your file manager into the terminal to insert their paths.
+Paste a copied image or screenshot with **Ctrl+Shift+V** or **Shift+Insert**.
+Clipboard images become private PNG files in the system temporary directory
+(`vibeterm-image-*.png`), and their paths are pasted into the active pane. This lets
+local tools such as Codex and Claude read the image; attachment display depends on
+the receiving application. Paths with spaces or shell punctuation are quoted.
+Files remain available for later reads until you or the system cleans the temporary
+directory. Remote SSH/container sessions need access to those files separately.
+Text paste and middle-click primary-selection paste continue to work as before.
 
 ## Verify
 

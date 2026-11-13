@@ -13,6 +13,16 @@ fn main() -> Result<()> {
             let mut line = String::new();
             std::io::stdin().read_line(&mut line)?;
         }
+        Some("image") => {
+            clipboard.set_image(arboard::ImageData {
+                width: 2,
+                height: 1,
+                bytes: std::borrow::Cow::Owned(vec![255, 0, 42, 255, 0, 255, 20, 128]),
+            })?;
+            println!("ready");
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+        }
         Some("primary") => println!(
             "{}",
             clipboard

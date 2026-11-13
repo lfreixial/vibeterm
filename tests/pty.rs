@@ -326,6 +326,21 @@ fn last_output(session: &Session) -> Option<String> {
         .last_output()
         .map(str::to_owned)
 }
+fn wait_for_output(session: &Session, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let output = last_output(session);
+        if output.as_deref() == Some(expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Expected {expected:?}; captured {output:?}; terminal:\n{}",
+            visible(session)
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
 #[test]
 fn bash_integration_preserves_prompt_commands_status_and_copies_real_output() {
     let (session, _home, _files) = integrated_shell(
@@ -335,13 +350,13 @@ fn bash_integration_preserves_prompt_commands_status_and_copies_real_output() {
     session
         .input(b"printf '\\033[31mhello world\\033[0m\\n'; false\r".to_vec())
         .unwrap();
-    wait_until(|| last_output(&session).as_deref() == Some("hello world\n"));
+    wait_for_output(&session, "hello world\n");
     session
         .input(b"printf '%s:%s\\n' \"$VT_STATUS\" \"$VT_HOOK\"\r".to_vec())
         .unwrap();
-    wait_until(|| last_output(&session).as_deref() == Some("1:kept\n"));
+    wait_for_output(&session, "1:kept\n");
     session.input(b"printf next\r".to_vec()).unwrap();
-    wait_until(|| last_output(&session).as_deref() == Some("next"));
+    wait_for_output(&session, "next");
 }
 #[test]
 fn bash_integration_does_not_replace_an_existing_debug_trap() {
@@ -352,29 +367,34 @@ fn bash_integration_does_not_replace_an_existing_debug_trap() {
     wait_until(|| visible(&session).contains("TRAP:kept"));
     assert!(last_output(&session).is_none());
 }
+fn zsh_program() -> String {
+    std::env::var("VIBETERM_TEST_ZSH").unwrap_or_else(|_| "/bin/zsh".into())
+}
 #[test]
 fn zsh_integration_preserves_startup_and_prompt_hooks() {
-    if !std::path::Path::new("/bin/zsh").exists() {
+    let shell = zsh_program();
+    if !std::path::Path::new(&shell).exists() {
         eprintln!("zsh unavailable; skipping real zsh integration test");
         return;
     }
     let (session, _home, _files) = integrated_shell(
-        "/bin/zsh",
+        &shell,
         "precmd() { VT_STATUS=$?; }; vt_hook() { VT_HOOK=kept; }; precmd_functions=(vt_hook)",
     );
     session
         .input(b"printf 'hello zsh\\n'; false\r".to_vec())
         .unwrap();
-    wait_until(|| last_output(&session).as_deref() == Some("hello zsh\n"));
+    wait_for_output(&session, "hello zsh\n");
     session.input(b"printf '%s:%s:%s:%s\\n' \"$VT_STATUS\" \"$VT_HOOK\" \"$VT_ENV_LOADED\" \"${ZDOTDIR-unset}\"\r".to_vec()).unwrap();
-    wait_until(|| last_output(&session).as_deref() == Some("1:kept:yes:unset\n"));
+    wait_for_output(&session, "1:kept:yes:unset\n");
     session.input(b"printf no-newline\r".to_vec()).unwrap();
-    wait_until(|| last_output(&session).as_deref() == Some("no-newline"));
+    wait_for_output(&session, "no-newline");
 }
 
 #[test]
 fn zsh_integration_restores_zdotdir_changed_by_zshenv() {
-    if !std::path::Path::new("/bin/zsh").exists() {
+    let shell = zsh_program();
+    if !std::path::Path::new(&shell).exists() {
         return;
     }
     let home = tempfile::tempdir().unwrap();
@@ -392,10 +412,10 @@ fn zsh_integration_restores_zdotdir_changed_by_zshenv() {
         "PS1='READY> '\nexport VT_RC_READ=yes\n",
     )
     .unwrap();
-    let mut cmd = portable_pty::CommandBuilder::new("/bin/zsh");
+    let mut cmd = portable_pty::CommandBuilder::new(&shell);
     cmd.env("HOME", home.path());
     cmd.env("ZDOTDIR", &original);
-    let _files = vibeterm::shell::prepare(&mut cmd, std::ffi::OsStr::new("/bin/zsh")).unwrap();
+    let _files = vibeterm::shell::prepare(&mut cmd, std::ffi::OsStr::new(&shell)).unwrap();
     let mut args: Vec<std::ffi::OsString> = vec!["/usr/bin/env".into()];
     for (key, value) in cmd.iter_extra_env_as_str() {
         args.push(format!("{key}={value}").into());
@@ -416,5 +436,5 @@ fn zsh_integration_restores_zdotdir_changed_by_zshenv() {
         )
         .unwrap();
     let expected = format!("yes:yes:{}\n", redirected.display());
-    wait_until(|| last_output(&session).as_deref() == Some(expected.as_str()));
+    wait_for_output(&session, expected.as_str());
 }
